@@ -5,6 +5,7 @@ use tars_base::{
 use tars_plugin::ToolExecutor;
 
 use crate::ProviderRegistry;
+use crate::retry::{classify_error, retry_countdown};
 use tars_base::AgentPhase;
 
 // ---------------------------------------------------------------------------
@@ -15,11 +16,22 @@ use tars_base::AgentPhase;
 pub struct AgentConfig {
     /// Hard turn limit — loop exits with `max_turns_reached = true` when hit.
     pub turn_limit: usize,
+    /// Maximum retries for transient provider errors.
+    pub max_retries: usize,
+    /// Base delay for exponential backoff in milliseconds.
+    pub retry_base_ms: u64,
+    /// Maximum retry delay cap in milliseconds.
+    pub max_retry_delay_ms: u64,
 }
 
 impl Default for AgentConfig {
     fn default() -> Self {
-        Self { turn_limit: 32 }
+        Self {
+            turn_limit: 32,
+            max_retries: 3,
+            retry_base_ms: 500,
+            max_retry_delay_ms: 32_000,
+        }
     }
 }
 
@@ -148,33 +160,86 @@ pub async fn run(
             })
             .await;
 
-        let mut rx = registry.stream(model, context, options).await?;
-
-        // Forward provider events, capture terminal message
+        // Stream with retry on typed transient errors
+        #[allow(unused_assignments)]
         let mut terminal: Option<(StopReason, tars_base::AssistantMessage)> = None;
-        while let Some(ev) = rx.recv().await {
-            let is_done = matches!(ev, StreamEvent::Done { .. });
-            let is_error = matches!(ev, StreamEvent::Error { .. });
-            // forward
-            let _ = event_tx.send(ev.clone()).await;
-            match ev {
-                StreamEvent::Done { reason, message } => {
-                    terminal = Some((reason, message));
+        let mut attempt: usize = 0;
+        loop {
+            let stream_res = registry.stream(model, context, options).await;
+            match stream_res {
+                Err(err) => {
+                    if let Some(delay) =
+                        classify_error(&err, attempt, config.max_retries, config.retry_base_ms)
+                    {
+                        let kind = match &err {
+                            tars_base::Error::RateLimited { .. } => "rate limited",
+                            tars_base::Error::Timeout(_) => "timeout",
+                            _ => "retryable error",
+                        };
+                        let _ = event_tx
+                            .send(StreamEvent::Phase {
+                                phase: AgentPhase::RateLimited,
+                                turn_started_at_ms: None,
+                                phase_started_at_ms: None,
+                            })
+                            .await;
+                        match retry_countdown(
+                            delay,
+                            attempt + 1,
+                            config.max_retries + 1,
+                            kind,
+                            &err.to_string(),
+                            event_tx,
+                            cancel,
+                        )
+                        .await
+                        {
+                            Ok(()) => {
+                                attempt += 1;
+                                continue;
+                            }
+                            Err(tars_base::Error::Cancelled) => {
+                                return Ok(AgentResult {
+                                    new_messages,
+                                    reason: StopReason::Aborted,
+                                    max_turns_reached: false,
+                                });
+                            }
+                            Err(e) => return Err(e),
+                        }
+                    } else {
+                        return Err(err);
+                    }
+                }
+                Ok(mut rx) => {
+                    // Forward provider events, capture terminal message
+                    let mut inner_terminal: Option<(StopReason, tars_base::AssistantMessage)> =
+                        None;
+                    while let Some(ev) = rx.recv().await {
+                        let is_done = matches!(ev, StreamEvent::Done { .. });
+                        let is_error = matches!(ev, StreamEvent::Error { .. });
+                        let _ = event_tx.send(ev.clone()).await;
+                        match ev {
+                            StreamEvent::Done { reason, message } => {
+                                inner_terminal = Some((reason, message));
+                                break;
+                            }
+                            StreamEvent::Error { reason, error } => {
+                                inner_terminal = Some((reason, error));
+                                break;
+                            }
+                            _ => {}
+                        }
+                        if cancel.is_cancelled() {
+                            break;
+                        }
+                        if is_done || is_error {
+                            break;
+                        }
+                    }
+                    terminal = inner_terminal;
                     break;
                 }
-                StreamEvent::Error { reason, error } => {
-                    terminal = Some((reason, error));
-                    break;
-                }
-                _ => {}
-            }
-            if cancel.is_cancelled() {
-                // drain quickly and abort
-                // drop rx to cancel provider task
-                break;
-            }
-            if is_done || is_error {
-                break;
             }
         }
 
@@ -410,7 +475,10 @@ mod tests {
             &registry,
             &mut executor,
             &StreamOptions::default(),
-            &AgentConfig { turn_limit: 5 },
+            &AgentConfig {
+                turn_limit: 5,
+                ..Default::default()
+            },
             &cancel,
             &event_tx,
             &mut |m| persisted.push(m),
@@ -482,7 +550,10 @@ mod tests {
             &registry,
             &mut executor,
             &StreamOptions::default(),
-            &AgentConfig { turn_limit: 2 },
+            &AgentConfig {
+                turn_limit: 2,
+                ..Default::default()
+            },
             &cancel,
             &event_tx,
             &mut |_| {},
@@ -590,5 +661,193 @@ mod tests {
         .unwrap();
         assert_eq!(result.reason, StopReason::Aborted);
         assert!(result.new_messages.is_empty());
+    }
+
+    // -- retry injection --
+
+    struct FlakyProvider {
+        fails_remaining: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        err: tars_base::Error,
+        success: MockResponse,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::Provider for FlakyProvider {
+        fn api_id(&self) -> &str {
+            "mock"
+        }
+        async fn stream(
+            &self,
+            model: &Model,
+            context: &Context,
+            options: &StreamOptions,
+        ) -> tars_base::Result<crate::EventReceiver> {
+            let prev = self.fails_remaining.fetch_update(
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+                |n| if n > 0 { Some(n - 1) } else { None },
+            );
+            if prev.is_ok() {
+                return Err(match &self.err {
+                    tars_base::Error::RateLimited {
+                        provider,
+                        retry_after,
+                    } => tars_base::Error::RateLimited {
+                        provider: provider.clone(),
+                        retry_after: *retry_after,
+                    },
+                    other => tars_base::Error::Internal(other.to_string()),
+                });
+            }
+            // success path: delegate to a one-shot MockProvider
+            let p = MockProvider::new(vec![self.success.clone()]);
+            p.stream(model, context, options).await
+        }
+    }
+
+    #[tokio::test]
+    async fn retry_recovers_from_transient_rate_limited() {
+        let fails = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(2));
+        let flaky = FlakyProvider {
+            fails_remaining: fails.clone(),
+            err: tars_base::Error::RateLimited {
+                provider: "mock".into(),
+                retry_after: Some(0),
+            },
+            success: MockResponse::Text("recovered".into()),
+        };
+        let mut registry = ProviderRegistry::new();
+        registry.register(flaky);
+        let mut ctx = Context {
+            messages: vec![Message::User(UserMessage::text("hi"))],
+            ..Default::default()
+        };
+        let model = mock_model();
+        let mut executor = EchoExecutor;
+        let cancel = CancelToken::new();
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(64);
+        let result = run(
+            &model,
+            &mut ctx,
+            &registry,
+            &mut executor,
+            &StreamOptions::default(),
+            &AgentConfig {
+                max_retries: 3,
+                retry_base_ms: 10,
+                ..Default::default()
+            },
+            &cancel,
+            &event_tx,
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.reason, StopReason::Stop);
+        assert_eq!(fails.load(std::sync::atomic::Ordering::SeqCst), 0);
+        // should have emitted at least one RateLimited phase and status
+        let mut saw_rate_limited = false;
+        let mut saw_status = false;
+        while let Ok(ev) = event_rx.try_recv() {
+            if matches!(
+                ev,
+                StreamEvent::Phase {
+                    phase: AgentPhase::RateLimited,
+                    ..
+                }
+            ) {
+                saw_rate_limited = true;
+            }
+            if matches!(ev, StreamEvent::Status { .. }) {
+                saw_status = true;
+            }
+        }
+        assert!(saw_rate_limited);
+        assert!(saw_status);
+    }
+
+    #[tokio::test]
+    async fn retry_exhausted_returns_error() {
+        let fails = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(5));
+        let flaky = FlakyProvider {
+            fails_remaining: fails.clone(),
+            err: tars_base::Error::Internal("boom".into()),
+            success: MockResponse::Text("never".into()),
+        };
+        let mut registry = ProviderRegistry::new();
+        registry.register(flaky);
+        let mut ctx = Context {
+            messages: vec![Message::User(UserMessage::text("hi"))],
+            ..Default::default()
+        };
+        let model = mock_model();
+        let mut executor = EchoExecutor;
+        let cancel = CancelToken::new();
+        let (event_tx, _) = tokio::sync::mpsc::channel(64);
+        let err = run(
+            &model,
+            &mut ctx,
+            &registry,
+            &mut executor,
+            &StreamOptions::default(),
+            &AgentConfig {
+                max_retries: 2,
+                retry_base_ms: 10,
+                ..Default::default()
+            },
+            &cancel,
+            &event_tx,
+            &mut |_| {},
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, tars_base::Error::Internal(_)));
+    }
+
+    #[tokio::test]
+    async fn retry_cancel_aborts_backoff() {
+        let fails = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(10));
+        let flaky = FlakyProvider {
+            fails_remaining: fails,
+            err: tars_base::Error::RateLimited {
+                provider: "mock".into(),
+                retry_after: Some(5),
+            },
+            success: MockResponse::Text("never".into()),
+        };
+        let mut registry = ProviderRegistry::new();
+        registry.register(flaky);
+        let mut ctx = Context {
+            messages: vec![Message::User(UserMessage::text("hi"))],
+            ..Default::default()
+        };
+        let model = mock_model();
+        let mut executor = EchoExecutor;
+        let cancel = CancelToken::new();
+        let cancel_clone = cancel.clone();
+        let (event_tx, _) = tokio::sync::mpsc::channel(64);
+        // cancel after 50ms
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            cancel_clone.cancel();
+        });
+        let result = run(
+            &model,
+            &mut ctx,
+            &registry,
+            &mut executor,
+            &StreamOptions::default(),
+            &AgentConfig {
+                max_retries: 5,
+                retry_base_ms: 500,
+                ..Default::default()
+            },
+            &cancel,
+            &event_tx,
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.reason, StopReason::Aborted);
     }
 }

@@ -10,4 +10,5 @@ pub use provider::{EventReceiver, EventSender, Provider, ProviderRegistry, STREA
 
 pub mod agent;
 pub mod providers;
+pub mod retry;
 pub mod system_prompt;
