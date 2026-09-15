@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use tars_base::{CancelToken, Context, Message, StreamOptions, UserMessage};
 use tars_engine::ProviderRegistry;
-use tars_engine::agent::{AgentConfig, AgentResult};
+use tars_engine::agent::{AgentConfig, AgentResult, needs_continuation, repair_messages};
 use tars_plugin_worker::InProcessWorker;
 
 use crate::server::SharedState;
@@ -32,6 +32,16 @@ pub async fn run_session_turn(
             msgs,
         )
     };
+
+    // Repair any orphan tool_use from a prior crash before appending the new turn
+    let stubs = repair_messages(&messages);
+    if !stubs.is_empty() {
+        let db = state.db.lock().await;
+        for stub in &stubs {
+            db.append_message(session_id, stub)?;
+        }
+        messages.extend(stubs.clone());
+    }
 
     // Append user message to DB and to context
     let user_msg = Message::User(UserMessage::text(user_text.to_string()));
@@ -102,6 +112,28 @@ pub async fn run_session_turn(
             Err(e)
         }
     }
+}
+
+pub async fn repair_session_if_needed(
+    state: &Arc<SharedState>,
+    session_id: &str,
+) -> tars_base::Result<bool> {
+    let messages = {
+        let db = state.db.lock().await;
+        db.get_messages(session_id)?
+    };
+    let stubs = repair_messages(&messages);
+    if !stubs.is_empty() {
+        let db = state.db.lock().await;
+        for stub in &stubs {
+            db.append_message(session_id, stub)?;
+        }
+        return Ok(true);
+    }
+    if needs_continuation(&messages) {
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 #[cfg(test)]
@@ -215,5 +247,61 @@ mod tests {
         assert_eq!(result.new_messages.len(), 3); // assistant tool, tool_result, assistant text
         let msgs = state.db.lock().await.get_messages(session_id).unwrap();
         assert_eq!(msgs.len(), 4); // user + 3
+    }
+
+    #[tokio::test]
+    async fn repair_killed_mid_tool_turn() {
+        let db = Db::open_memory().unwrap();
+        let state = Arc::new(SharedState::new(db));
+        let session_id = "s3";
+        {
+            let db = state.db.lock().await;
+            db.create_session(&crate::db::StoredSession {
+                id: session_id.into(),
+                model: mock_model(),
+                system_prompt: None,
+                cwd: Some("/tmp".into()),
+                created_at: tars_base::timestamp_ms() as i64,
+            })
+            .unwrap();
+            // Simulate a crash: assistant with ToolUse but no ToolResult
+            let mut assistant = tars_base::AssistantMessage::empty("mock", "mock", "mock-model");
+            assistant.stop_reason = tars_base::StopReason::ToolUse;
+            assistant
+                .content
+                .push(tars_base::AssistantContent::ToolCall(ToolCall {
+                    id: "tc_orphan".into(),
+                    name: "bash".into(),
+                    arguments: serde_json::json!({"command": "sleep 10"}),
+                }));
+            db.append_message(session_id, &Message::Assistant(assistant))
+                .unwrap();
+        }
+
+        // Repair should synthesize a stub
+        let repaired = repair_session_if_needed(&state, session_id).await.unwrap();
+        assert!(repaired);
+        let msgs = state.db.lock().await.get_messages(session_id).unwrap();
+        assert_eq!(msgs.len(), 2);
+        assert!(
+            matches!(&msgs[1], Message::ToolResult(tr) if tr.tool_call_id == "tc_orphan" && tr.is_error)
+        );
+        // No dangling tool_use after repair
+        let stubs = tars_engine::agent::repair_messages(&msgs);
+        assert!(stubs.is_empty());
+
+        // Now a normal Chat should see a clean history (orphan stub + new user)
+        let mut registry = ProviderRegistry::new();
+        registry.register(MockProvider::new(vec![MockResponse::Text(
+            "recovered".into(),
+        )]));
+        let cancel = CancelToken::new();
+        let result = run_session_turn(state.clone(), &registry, session_id, "continue", &cancel)
+            .await
+            .unwrap();
+        assert_eq!(result.reason, tars_base::StopReason::Stop);
+        let final_msgs = state.db.lock().await.get_messages(session_id).unwrap();
+        // Should be: assistant orphan + stub + user continue + assistant recovered
+        assert_eq!(final_msgs.len(), 4);
     }
 }
