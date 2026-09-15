@@ -45,7 +45,7 @@ impl Paths {
         let runtime_dir = if let Ok(r) = std::env::var("XDG_RUNTIME_DIR") {
             PathBuf::from(r).join("tars")
         } else if let Ok(h) = std::env::var("HOME") {
-            PathBuf::from(h).join(".tau")
+            PathBuf::from(h).join(".tars")
         } else {
             PathBuf::from("/tmp").join(format!("tars-{}", std::process::id()))
         };
@@ -74,7 +74,7 @@ impl Paths {
         Self {
             config_dir: home.join(".config").join("tars"),
             data_dir: home.join(".local").join("share").join("tars"),
-            runtime_dir: home.join(".tau"),
+            runtime_dir: home.join(".tars"),
             state_dir: home.join(".local").join("state").join("tars"),
         }
     }
@@ -89,7 +89,7 @@ impl Paths {
         &self.data_dir
     }
 
-    /// `$XDG_RUNTIME_DIR/tars` (or `~/.tau`). Short-lived runtime files.
+    /// `$XDG_RUNTIME_DIR/tars` (or `~/.tars`). Short-lived runtime files.
     pub fn runtime_dir(&self) -> &Path {
         &self.runtime_dir
     }
@@ -141,7 +141,7 @@ mod tests {
         let paths = Paths::from_home(home);
         assert_eq!(paths.config_dir(), Path::new("/home/alice/.config/tars"));
         assert_eq!(paths.data_dir(), Path::new("/home/alice/.local/share/tars"));
-        assert_eq!(paths.runtime_dir(), Path::new("/home/alice/.tau"));
+        assert_eq!(paths.runtime_dir(), Path::new("/home/alice/.tars"));
         assert_eq!(
             paths.state_dir(),
             Path::new("/home/alice/.local/state/tars")
@@ -156,8 +156,8 @@ mod tests {
             paths.logs_dir(),
             Path::new("/home/alice/.local/state/tars/logs")
         );
-        assert_eq!(paths.socket_path(), Path::new("/home/alice/.tau/tars.sock"));
-        assert_eq!(paths.pid_path(), Path::new("/home/alice/.tau/tars.pid"));
+        assert_eq!(paths.socket_path(), Path::new("/home/alice/.tars/tars.sock"));
+        assert_eq!(paths.pid_path(), Path::new("/home/alice/.tars/tars.pid"));
         assert_eq!(
             paths.providers_path(),
             Path::new("/home/alice/.config/tars/providers.toml")
@@ -175,7 +175,7 @@ mod tests {
     #[test]
     fn detect_config_data_state_end_with_tars() {
         // Loose smoke test: whatever the environment says, the resolved
-        // config/data/state dirs are named "tars". (runtime_dir is "~/.tau"
+        // config/data/state dirs are named "tars". (runtime_dir is "~/.tars"
         // on the HOME fallback, so it is not asserted here.)
         let paths = Paths::detect();
         assert_eq!(
