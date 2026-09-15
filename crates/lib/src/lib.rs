@@ -4,5 +4,6 @@
 //! runner that bridges `Request::Chat` to an engine loop, and the subprocess
 //! plugin manager. Also bundles the `tars worker` plugin binary.
 
+pub mod agent_runner;
 pub mod db;
 pub mod server;
