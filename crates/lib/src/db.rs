@@ -45,6 +45,9 @@ pub struct Db {
     conn: Connection,
 }
 
+unsafe impl Send for Db {}
+unsafe impl Sync for Db {}
+
 impl Db {
     pub fn open(path: &Path) -> tars_base::Result<Self> {
         if let Some(parent) = path.parent() {

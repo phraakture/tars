@@ -15,15 +15,38 @@ use crate::db::{Db, StoredSession};
 pub struct SharedState {
     pub db: Arc<Mutex<Db>>,
     pub broadcast: broadcast::Sender<Response>,
+    pub registry: Arc<tars_engine::ProviderRegistry>,
 }
 
 impl SharedState {
     pub fn new(db: Db) -> Self {
+        let mut registry = tars_engine::ProviderRegistry::new();
+        registry.register(tars_engine::providers::LogProvider);
+        registry.register(tars_engine::providers::Anthropic);
+        registry.register(tars_engine::providers::OpenAi);
+        Self::with_registry(db, registry)
+    }
+
+    pub fn with_registry(db: Db, registry: tars_engine::ProviderRegistry) -> Self {
         let (tx, _) = broadcast::channel(64);
         Self {
             db: Arc::new(Mutex::new(db)),
             broadcast: tx,
+            registry: Arc::new(registry),
         }
+    }
+
+    pub fn with_mock(db: Db) -> Self {
+        let mut registry = tars_engine::ProviderRegistry::new();
+        registry.register(tars_engine::providers::LogProvider);
+        let mut mock_registry = tars_engine::ProviderRegistry::new();
+        mock_registry.register(tars_engine::providers::LogProvider);
+        // For tests, also register mock if needed via with_registry
+        Self::with_registry(db, {
+            let mut r = tars_engine::ProviderRegistry::new();
+            r.register(tars_engine::providers::LogProvider);
+            r
+        })
     }
 }
 
@@ -80,7 +103,7 @@ fn test_model() -> Model {
     }
 }
 
-pub async fn dispatch(state: &SharedState, req: Request) -> Response {
+pub async fn dispatch(state: Arc<SharedState>, req: Request) -> Response {
     match req {
         Request::CreateSession {
             model,
@@ -189,25 +212,22 @@ pub async fn dispatch(state: &SharedState, req: Request) -> Response {
         Request::Chat {
             session_id,
             text,
-            attachments,
+            attachments: _,
         } => {
-            // MVP: append user message to DB and broadcast, return Ok
-            let mut content = vec![tars_base::UserContent::Text(tars_base::TextContent {
-                text: text.clone(),
-                text_signature: None,
-            })];
-            for att in attachments {
-                content.push(att.to_user_content());
-            }
-            let msg = Message::User(tars_base::UserMessage {
-                content,
-                timestamp: tars_base::timestamp_ms(),
+            let state_clone = state.clone();
+            let sid = session_id.clone();
+            let txt = text.clone();
+            tokio::spawn(async move {
+                let cancel = tars_base::CancelToken::new();
+                let _ = crate::agent_runner::run_session_turn(
+                    state_clone.clone(),
+                    &state_clone.registry,
+                    &sid,
+                    &txt,
+                    &cancel,
+                )
+                .await;
             });
-            let db = state.db.lock().await;
-            let _ = db.append_message(&session_id, &msg);
-            let _ = state
-                .broadcast
-                .send(Response::UserMessage { text: text.clone() });
             Response::Ok
         }
         Request::Subscribe { session_id } => {
@@ -259,7 +279,7 @@ pub async fn handle_connection(state: Arc<SharedState>, stream: UnixStream) {
 
         // Special handling for Subscribe: enter broadcast forward loop
         if matches!(req, Request::Subscribe { .. }) {
-            let resp = dispatch(&state, req).await;
+            let resp = dispatch(state.clone(), req).await;
             let _ = tars_base::write_json_line_async(&mut write_half, &resp).await;
             // Now forward broadcast events until client disconnects
             loop {
@@ -287,7 +307,7 @@ pub async fn handle_connection(state: Arc<SharedState>, stream: UnixStream) {
             break;
         }
 
-        let resp = dispatch(&state, req).await;
+        let resp = dispatch(state.clone(), req).await;
         if tars_base::write_json_line_async(&mut write_half, &resp)
             .await
             .is_err()
@@ -498,5 +518,85 @@ mod tests {
         let msgs = state.db.lock().await.get_messages(&session_id).unwrap();
         assert_eq!(msgs.len(), 1);
         assert!(matches!(msgs[0], Message::User(_)));
+    }
+
+    #[tokio::test]
+    async fn server_via_listener_log_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket_path = dir.path().join("tars-test.sock");
+        let db = Db::open_memory().unwrap();
+        let state = Arc::new(SharedState::new(db));
+        // Create a session with the log model directly (so Chat uses LogProvider)
+        let session_id = "s_log";
+        {
+            let log_model = tars_engine::providers::log::log_model();
+            let db = state.db.lock().await;
+            db.create_session(&StoredSession {
+                id: session_id.into(),
+                model: log_model,
+                system_prompt: None,
+                cwd: Some("/tmp".into()),
+                created_at: tars_base::timestamp_ms() as i64,
+            })
+            .unwrap();
+        }
+
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let state_clone = state.clone();
+        tokio::spawn(async move {
+            let _ = run(listener, state_clone).await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let stream = UnixStream::connect(&socket_path).await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+
+        let req = Request::Chat {
+            session_id: session_id.into(),
+            text: "hello log".into(),
+            attachments: vec![],
+        };
+        tars_base::write_json_line_async(&mut write_half, &req)
+            .await
+            .unwrap();
+        let resp: Response = tars_base::read_json_line_async(&mut reader)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(resp, Response::Ok);
+
+        // Now read streamed events until AgentDone
+        let mut saw_stream = false;
+        let mut saw_done = false;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        while tokio::time::Instant::now() < deadline {
+            let res = tokio::time::timeout(
+                std::time::Duration::from_millis(200),
+                tars_base::read_json_line_async::<Response>(&mut reader),
+            )
+            .await;
+            if let Ok(Ok(Some(resp))) = res {
+                match resp {
+                    Response::Stream { .. } => saw_stream = true,
+                    Response::AgentDone => {
+                        saw_done = true;
+                        break;
+                    }
+                    _ => {}
+                }
+            } else {
+                break;
+            }
+        }
+        assert!(
+            saw_stream,
+            "should have seen Stream events from LogProvider"
+        );
+        assert!(saw_done, "should have seen AgentDone");
+
+        // DB should now have user + assistant (LogProvider produces empty assistant)
+        let msgs = state.db.lock().await.get_messages(session_id).unwrap();
+        assert!(msgs.len() >= 2);
     }
 }

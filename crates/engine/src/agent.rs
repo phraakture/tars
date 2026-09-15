@@ -147,7 +147,7 @@ pub async fn run(
     config: &AgentConfig,
     cancel: &CancelToken,
     event_tx: &tokio::sync::mpsc::Sender<StreamEvent>,
-    on_message: &mut dyn FnMut(Message),
+    on_message: &mut (dyn FnMut(Message) + Send),
 ) -> tars_base::Result<AgentResult> {
     let mut new_messages = Vec::new();
 

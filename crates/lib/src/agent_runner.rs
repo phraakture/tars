@@ -73,7 +73,6 @@ pub async fn run_session_turn(
         }
     });
 
-    let mut persisted_messages: Vec<Message> = Vec::new();
     let result = tars_engine::agent::run(
         &model,
         &mut context,
@@ -83,9 +82,7 @@ pub async fn run_session_turn(
         &config,
         cancel,
         &event_tx,
-        &mut |msg| {
-            persisted_messages.push(msg);
-        },
+        &mut |_| {},
     )
     .await;
 
