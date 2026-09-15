@@ -38,11 +38,11 @@ enum ServerCmd {
 #[derive(Parser)]
 struct ChatArgs {
     /// One-shot message to send
-    #[arg(short, long)]
+    #[arg(short = 'm', long)]
     message: Option<String>,
 
     /// Model to use (default: first available)
-    #[arg(short, long)]
+    #[arg(short = 'M', long)]
     model: Option<String>,
 }
 
@@ -88,7 +88,6 @@ async fn main() -> anyhow::Result<()> {
             let session_id = client.create_session(args.model, None).await?;
 
             if let Some(text) = args.message {
-                // One-shot mode
                 let mut rx = client.chat(&session_id, &text).await?;
                 while let Some(resp) = rx.recv().await {
                     match resp {
@@ -215,10 +214,15 @@ async fn start_server_daemon(paths: &tars_base::Paths) -> anyhow::Result<()> {
     std::fs::write(&pid_path, std::process::id().to_string())?;
 
     // Run server in background (this task will be detached)
+    let sock = socket_path.clone();
+    let pid = pid_path.clone();
     tokio::spawn(async move {
-        let _ = tars_lib::server::run(listener, state).await;
-        let _ = std::fs::remove_file(&socket_path);
-        let _ = std::fs::remove_file(&pid_path);
+        match tars_lib::server::run(listener, state).await {
+            Ok(()) => {}
+            Err(e) => eprintln!("server error: {e}"),
+        }
+        let _ = std::fs::remove_file(&sock);
+        let _ = std::fs::remove_file(&pid);
     });
 
     Ok(())

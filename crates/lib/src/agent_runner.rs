@@ -192,7 +192,6 @@ mod tests {
         )]));
 
         let cancel = CancelToken::new();
-        let mut broadcast_rx = state.broadcast.subscribe();
 
         let result = run_session_turn(state.clone(), &registry, session_id, "hi", &cancel)
             .await
@@ -207,10 +206,11 @@ mod tests {
         assert!(matches!(msgs[0], Message::User(_)));
         assert!(matches!(msgs[1], Message::Assistant(_)));
 
-        // Broadcast should have received Stream events and AgentDone
+        // Session buffer should have received Stream events and AgentDone
+        let buffered = state.drain_session_events(session_id).await;
         let mut saw_stream = false;
         let mut saw_done = false;
-        while let Ok(resp) = broadcast_rx.try_recv() {
+        for resp in buffered {
             match resp {
                 Response::Stream { .. } => saw_stream = true,
                 Response::AgentDone => saw_done = true,

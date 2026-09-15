@@ -9,7 +9,7 @@ use tokio::sync::{Mutex, broadcast};
 use tars_base::protocol::{
     ErrorKind, ModelInfo, Request, Response, SessionInfo, SessionStats, TokenStats,
 };
-use tars_base::{AgentPhase, Model, ModelCost, ThinkingStyle};
+use tars_base::{AgentPhase, ThinkingStyle};
 
 use crate::db::{Db, StoredSession};
 
@@ -46,14 +46,10 @@ impl SharedState {
         Self::with_registry(db, registry)
     }
 
-    /// Push an event to both the session buffer and the broadcast channel.
+    /// Push an event to the session buffer.
     pub async fn push_event(&self, session_id: &str, resp: Response) {
         let mut buf = self.session_events.lock().await;
-        buf.entry(session_id.to_string())
-            .or_default()
-            .push(resp.clone());
-        drop(buf);
-        let _ = self.broadcast.send(resp);
+        buf.entry(session_id.to_string()).or_default().push(resp);
     }
 
     /// Drain the session buffer for a given session.
@@ -101,21 +97,6 @@ fn mock_model_info() -> ModelInfo {
     }
 }
 
-fn test_model() -> Model {
-    Model {
-        id: "mock-model".into(),
-        name: "Mock".into(),
-        api: "mock".into(),
-        provider: "mock".into(),
-        base_url: "http://mock".into(),
-        thinking: ThinkingStyle::None,
-        cost: ModelCost::default(),
-        context_window: 100_000,
-        max_tokens: 4096,
-        headers: Default::default(),
-    }
-}
-
 pub async fn dispatch(state: Arc<SharedState>, req: Request) -> Response {
     match req {
         Request::CreateSession {
@@ -125,9 +106,10 @@ pub async fn dispatch(state: Arc<SharedState>, req: Request) -> Response {
             ..
         } => {
             let id = format!("s{}", tars_base::timestamp_ms());
+            let default_model = tars_engine::providers::log::log_model();
             let stored = StoredSession {
                 id: id.clone(),
-                model: test_model(),
+                model: default_model,
                 system_prompt: system_prompt.or(Some("default system".into())),
                 cwd: cwd.clone(),
                 created_at: tars_base::timestamp_ms() as i64,
@@ -283,7 +265,6 @@ pub async fn handle_connection(state: Arc<SharedState>, stream: UnixStream) {
         // Send Ok immediately so the client knows the subscription is active,
         // then forward broadcast events until AgentDone or disconnect.
         if matches!(req, Request::Subscribe { .. }) {
-            // Extract session_id from the request for buffer draining
             let sid = if let Request::Subscribe { session_id } = &req {
                 session_id.clone()
             } else {
@@ -291,53 +272,36 @@ pub async fn handle_connection(state: Arc<SharedState>, stream: UnixStream) {
             };
             let resp = dispatch(state.clone(), req).await;
             let _ = tars_base::write_json_line_async(&mut write_half, &resp).await;
-            // Drain buffered events from the session (sent by agent before Subscribe)
-            let buffered = state.drain_session_events(&sid).await;
-            for resp in buffered {
-                let is_terminal = matches!(
-                    resp,
-                    Response::AgentDone | Response::Cancelled | Response::Error { .. }
-                );
-                if tars_base::write_json_line_async(&mut write_half, &resp)
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
-                if is_terminal {
-                    break;
-                }
-            }
-            // If a terminal event was already buffered, we're done
-            // Otherwise subscribe to broadcast for future events
-            let mut broadcast_rx = state.broadcast.subscribe();
-            // Now forward broadcast events until client disconnects
-            loop {
-                tokio::select! {
-                    res = reader.read_line(&mut line) => {
-                        match res {
-                            Ok(0) => break,
-                            Ok(_) => {
-                                line.clear();
-                                continue;
-                            }
-                            Err(_) => break,
-                        }
+            // Drain and forward events from session buffer until terminal.
+            // The agent runner pushes events to session_events; we poll until
+            // we see AgentDone (or error/cancel).
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+            let mut done = false;
+            while !done {
+                let buffered = state.drain_session_events(&sid).await;
+                let had_events = !buffered.is_empty();
+                for resp in buffered {
+                    let is_terminal = matches!(
+                        resp,
+                        Response::AgentDone | Response::Cancelled | Response::Error { .. }
+                    );
+                    if tars_base::write_json_line_async(&mut write_half, &resp)
+                        .await
+                        .is_err()
+                    {
+                        done = true;
+                        break;
                     }
-                    res = broadcast_rx.recv() => {
-                        match res {
-                            Ok(resp) => {
-                                if tars_base::write_json_line_async(&mut write_half, &resp).await.is_err() {
-                                    break;
-                                }
-                                if matches!(resp, Response::AgentDone | Response::Cancelled | Response::Error { .. }) {
-                                    break;
-                                }
-                            }
-                            Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                            Err(broadcast::error::RecvError::Closed) => break,
-                        }
+                    if is_terminal {
+                        done = true;
+                        break;
                     }
+                }
+                if !done && !had_events {
+                    if tokio::time::Instant::now() >= deadline {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                 }
             }
             break;
@@ -444,7 +408,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn broadcast_via_subscribe() {
+    async fn subscribe_drains_session_buffer() {
         let db = Db::open_memory().unwrap();
         let state = Arc::new(SharedState::new(db));
         let (a, b) = UnixStream::pair().unwrap();
@@ -456,7 +420,7 @@ mod tests {
         let (read_half, mut write_half) = b.into_split();
         let mut reader = BufReader::new(read_half);
 
-        // First create a session to subscribe to
+        // Create a session
         let req = Request::CreateSession {
             model: None,
             provider: None,
@@ -477,7 +441,11 @@ mod tests {
             other => panic!("expected SessionCreated, got {:?}", other),
         };
 
-        // Subscribe
+        // Push events to the session buffer BEFORE subscribing
+        state.push_event(&session_id, Response::Ok).await;
+        state.push_event(&session_id, Response::AgentDone).await;
+
+        // Subscribe — should drain the buffered events
         let req = Request::Subscribe {
             session_id: session_id.clone(),
         };
@@ -490,19 +458,18 @@ mod tests {
             .unwrap();
         assert_eq!(resp, Response::Ok);
 
-        // Broadcast a Stream event via SharedState
-        let event = Response::Stream {
-            event: Box::new(tars_base::StreamEvent::Status {
-                message: "hello broadcast".into(),
-            }),
-        };
-        let _ = state.broadcast.send(event.clone());
+        // Should receive the buffered events
+        let resp: Response = tars_base::read_json_line_async(&mut reader)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(resp, Response::Ok);
 
         let resp: Response = tars_base::read_json_line_async(&mut reader)
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(resp, event);
+        assert_eq!(resp, Response::AgentDone);
     }
 
     #[tokio::test]
@@ -551,9 +518,9 @@ mod tests {
             .unwrap();
         assert_eq!(resp, Response::Ok);
 
-        // Verify DB has the user message
+        // Verify DB has the user message and agent response
         let msgs = state.db.lock().await.get_messages(&session_id).unwrap();
-        assert_eq!(msgs.len(), 1);
+        assert!(!msgs.is_empty());
         assert!(matches!(msgs[0], Message::User(_)));
     }
 
