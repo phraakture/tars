@@ -1,0 +1,5 @@
+//! In-process worker tools for tars: the built-in tool implementations
+//! (`bash`, `read`, `write`, `edit`) and their shared registry/dispatch.
+//!
+//! These same definitions are consumed by the in-process executor and by the
+//! `tars worker` plugin binary.

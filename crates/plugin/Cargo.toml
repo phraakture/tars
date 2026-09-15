@@ -1,0 +1,16 @@
+[package]
+name = "tars-plugin"
+description = "Plugin SDK: tool execution contract and plugin transport for tars"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+tars-base = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }

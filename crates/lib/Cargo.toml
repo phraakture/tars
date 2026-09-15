@@ -1,0 +1,20 @@
+[package]
+name = "tars-lib"
+description = "The tars server daemon: persistence, socket dispatch, agent runner, plugin manager"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+tars-base = { workspace = true }
+tars-engine = { workspace = true }
+tars-plugin = { workspace = true }
+tars-plugin-worker = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+tracing = { workspace = true }

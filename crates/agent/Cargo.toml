@@ -1,0 +1,15 @@
+[package]
+name = "tars-agent"
+description = "The tars agent CLI"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+tars-base = { workspace = true }
+tars-client = { workspace = true }
+tars-lib = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }

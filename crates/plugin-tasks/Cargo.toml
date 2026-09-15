@@ -1,0 +1,16 @@
+[package]
+name = "tars-plugin-tasks"
+description = "Task board plugin for tars (post-MVP)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+tars-base = { workspace = true }
+tars-plugin = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
