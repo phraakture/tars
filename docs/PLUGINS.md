@@ -72,6 +72,9 @@ Shipped by the `tars-worker` binary:
 | `read` | Read file contents; each line is prefixed with a stable per-line hash usable by `edit` |
 | `write` | Create or fully overwrite files |
 | `edit` | Precise edits by exact text match or by line anchor, batched across files |
+| `get_file_skeleton` | Outline source files (signatures only, no bodies) via tree-sitter; Rust, Python, JS, TS, TSX |
+| `get_function` | Extract complete function/method bodies by qualified name (`Foo.bar`, `::` accepted for Rust) |
+| `diagnostics_scan` | Per-file lint/diagnostics: Rust via `cargo check`; other extensions via `.tars/diagnostics.toml` |
 
 ## Writing a Custom Plugin
 
@@ -180,3 +183,16 @@ Cancellation is cooperative. Tools that never check the token run to completion.
 - The server serializes tool calls per manager (one blocking lock), so a single worker handles calls one at a time from the server side.
 - Worker stderr is not forwarded to server logs yet.
 - If a worker dies mid-call, the server surfaces an IO error for that call; there is no automatic respawn yet.
+- `get_file_skeleton` drops the `export` keyword on exported JS/TS declarations (the declaration itself is always included).
+
+## Configuring Extra Diagnostics
+
+`.tars/diagnostics.toml` in a project root adds tools for extensions that have no built-in scanner:
+
+```toml
+[[tool]]
+extensions = ["py"]
+command = "ruff check {file}"
+```
+
+Each configured command runs once per file; combined stdout/stderr becomes one `info`-severity diagnostic for that file.
