@@ -1,4 +1,6 @@
 pub mod bash;
+pub mod line_hash;
+pub mod read;
 
 use std::path::{Path, PathBuf};
 
@@ -122,7 +124,7 @@ pub fn execute_tool(
 }
 
 pub fn default_tools() -> Vec<ToolDef> {
-    vec![bash::tool_def()]
+    vec![bash::tool_def(), read::tool_def()]
 }
 
 pub fn tool_schemas(tools: &[ToolDef]) -> Vec<Tool> {

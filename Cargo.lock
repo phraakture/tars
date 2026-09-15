@@ -1225,10 +1225,12 @@ dependencies = [
 name = "tars-plugin-worker"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "serde",
  "serde_json",
  "tars-base",
  "tars-plugin",
+ "tempfile",
  "thiserror",
  "tokio",
  "tracing",
