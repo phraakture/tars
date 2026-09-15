@@ -4,8 +4,10 @@
 //! run tools on behalf of the agent loop, and the transport helpers plugins use
 //! to speak to the server.
 
+pub mod executor;
 pub mod tool_prompt;
 
+pub use executor::ToolExecutor;
 pub use tool_prompt::ToolPrompt;
 
 /// Built-in tool prompts for the default tools (bash, read, edit, write).

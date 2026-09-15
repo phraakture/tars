@@ -156,7 +156,10 @@ mod tests {
             paths.logs_dir(),
             Path::new("/home/alice/.local/state/tars/logs")
         );
-        assert_eq!(paths.socket_path(), Path::new("/home/alice/.tars/tars.sock"));
+        assert_eq!(
+            paths.socket_path(),
+            Path::new("/home/alice/.tars/tars.sock")
+        );
         assert_eq!(paths.pid_path(), Path::new("/home/alice/.tars/tars.pid"));
         assert_eq!(
             paths.providers_path(),
