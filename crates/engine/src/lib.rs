@@ -7,3 +7,5 @@
 
 mod provider;
 pub use provider::{EventReceiver, EventSender, Provider, ProviderRegistry, STREAM_CAPACITY};
+
+pub mod providers;

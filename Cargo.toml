@@ -33,3 +33,5 @@ futures = "0.3"
 async-trait = "0.1"
 tracing = "0.1"
 tempfile = "3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls-webpki-roots", "http2", "system-proxy"] }
+bytes = "1"

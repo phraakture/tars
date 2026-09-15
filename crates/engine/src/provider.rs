@@ -208,11 +208,12 @@ mod tests {
             .unwrap();
 
         // The registered provider saw our exact context.
-        let binding = seen.lock().unwrap();
-        let (seen_model, seen_ctx, _) = binding.as_ref().expect("stream ran");
-        assert_eq!(seen_model.id, "test-model");
-        assert_eq!(seen_ctx.system_prompt.as_deref(), Some("You are a test"));
-        drop(binding);
+        {
+            let binding = seen.lock().unwrap();
+            let (seen_model, seen_ctx, _) = binding.as_ref().expect("stream ran");
+            assert_eq!(seen_model.id, "test-model");
+            assert_eq!(seen_ctx.system_prompt.as_deref(), Some("You are a test"));
+        }
 
         // And its events flow through the channel untouched.
         let start = rx.recv().await.unwrap();
