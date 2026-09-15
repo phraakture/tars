@@ -5,5 +5,7 @@
 //! `tars worker` plugin binary.
 
 pub mod tools;
+pub mod worker;
 
 pub use tools::{ToolDef, ToolOutput, default_tools, execute_tool, tool_schemas};
+pub use worker::InProcessWorker;
