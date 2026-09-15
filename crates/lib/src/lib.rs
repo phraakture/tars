@@ -5,3 +5,4 @@
 //! plugin manager. Also bundles the `tars worker` plugin binary.
 
 pub mod db;
+pub mod server;
