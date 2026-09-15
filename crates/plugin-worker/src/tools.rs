@@ -1,3 +1,5 @@
+pub mod bash;
+
 use std::path::{Path, PathBuf};
 
 use tars_base::{CancelToken, Tool, ToolCall, ToolResultMessage, timestamp_ms};
@@ -120,7 +122,7 @@ pub fn execute_tool(
 }
 
 pub fn default_tools() -> Vec<ToolDef> {
-    Vec::new()
+    vec![bash::tool_def()]
 }
 
 pub fn tool_schemas(tools: &[ToolDef]) -> Vec<Tool> {
@@ -223,10 +225,9 @@ mod tests {
     }
 
     #[test]
-    fn default_tools_empty_for_now() {
-        // Will be populated in 3.3-3.6; for 3.2 it should at least return a vec
+    fn default_tools_contains_bash() {
         let tools = default_tools();
-        assert!(tools.is_empty());
+        assert!(tools.iter().any(|t| t.tool.name == "bash"));
     }
 
     #[test]
