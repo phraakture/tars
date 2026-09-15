@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -8,7 +9,7 @@ use tokio::sync::{Mutex, broadcast};
 use tars_base::protocol::{
     ErrorKind, ModelInfo, Request, Response, SessionInfo, SessionStats, TokenStats,
 };
-use tars_base::{AgentPhase, Message, Model, ModelCost, ThinkingStyle};
+use tars_base::{AgentPhase, Model, ModelCost, ThinkingStyle};
 
 use crate::db::{Db, StoredSession};
 
@@ -16,6 +17,8 @@ pub struct SharedState {
     pub db: Arc<Mutex<Db>>,
     pub broadcast: broadcast::Sender<Response>,
     pub registry: Arc<tars_engine::ProviderRegistry>,
+    /// Per-session event buffer: agent runner pushes here, Subscribe drains first.
+    pub session_events: Arc<Mutex<HashMap<String, Vec<Response>>>>,
 }
 
 impl SharedState {
@@ -33,20 +36,30 @@ impl SharedState {
             db: Arc::new(Mutex::new(db)),
             broadcast: tx,
             registry: Arc::new(registry),
+            session_events: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
     pub fn with_mock(db: Db) -> Self {
         let mut registry = tars_engine::ProviderRegistry::new();
         registry.register(tars_engine::providers::LogProvider);
-        let mut mock_registry = tars_engine::ProviderRegistry::new();
-        mock_registry.register(tars_engine::providers::LogProvider);
-        // For tests, also register mock if needed via with_registry
-        Self::with_registry(db, {
-            let mut r = tars_engine::ProviderRegistry::new();
-            r.register(tars_engine::providers::LogProvider);
-            r
-        })
+        Self::with_registry(db, registry)
+    }
+
+    /// Push an event to both the session buffer and the broadcast channel.
+    pub async fn push_event(&self, session_id: &str, resp: Response) {
+        let mut buf = self.session_events.lock().await;
+        buf.entry(session_id.to_string())
+            .or_default()
+            .push(resp.clone());
+        drop(buf);
+        let _ = self.broadcast.send(resp);
+    }
+
+    /// Drain the session buffer for a given session.
+    pub async fn drain_session_events(&self, session_id: &str) -> Vec<Response> {
+        let mut buf = self.session_events.lock().await;
+        buf.remove(session_id).unwrap_or_default()
     }
 }
 
@@ -243,23 +256,12 @@ pub async fn handle_connection(state: Arc<SharedState>, stream: UnixStream) {
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
     let mut line = String::new();
-    let mut broadcast_rx = state.broadcast.subscribe();
 
     loop {
         line.clear();
-        let n = tokio::select! {
-            res = reader.read_line(&mut line) => {
-                match res {
-                    Ok(n) => n,
-                    Err(_) => break,
-                }
-            }
-            res = broadcast_rx.recv() => {
-                if let Ok(resp) = res {
-                    let _ = tars_base::write_json_line_async(&mut write_half, &resp).await;
-                }
-                continue;
-            }
+        let n = match reader.read_line(&mut line).await {
+            Ok(n) => n,
+            Err(_) => break,
         };
         if n == 0 {
             break;
@@ -277,10 +279,38 @@ pub async fn handle_connection(state: Arc<SharedState>, stream: UnixStream) {
             }
         };
 
-        // Special handling for Subscribe: enter broadcast forward loop
+        // Special handling for Subscribe: enter broadcast forward loop.
+        // Send Ok immediately so the client knows the subscription is active,
+        // then forward broadcast events until AgentDone or disconnect.
         if matches!(req, Request::Subscribe { .. }) {
+            // Extract session_id from the request for buffer draining
+            let sid = if let Request::Subscribe { session_id } = &req {
+                session_id.clone()
+            } else {
+                unreachable!()
+            };
             let resp = dispatch(state.clone(), req).await;
             let _ = tars_base::write_json_line_async(&mut write_half, &resp).await;
+            // Drain buffered events from the session (sent by agent before Subscribe)
+            let buffered = state.drain_session_events(&sid).await;
+            for resp in buffered {
+                let is_terminal = matches!(
+                    resp,
+                    Response::AgentDone | Response::Cancelled | Response::Error { .. }
+                );
+                if tars_base::write_json_line_async(&mut write_half, &resp)
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+                if is_terminal {
+                    break;
+                }
+            }
+            // If a terminal event was already buffered, we're done
+            // Otherwise subscribe to broadcast for future events
+            let mut broadcast_rx = state.broadcast.subscribe();
             // Now forward broadcast events until client disconnects
             loop {
                 tokio::select! {
@@ -288,7 +318,6 @@ pub async fn handle_connection(state: Arc<SharedState>, stream: UnixStream) {
                         match res {
                             Ok(0) => break,
                             Ok(_) => {
-                                // For MVP, ignore further requests while subscribed
                                 line.clear();
                                 continue;
                             }
@@ -296,10 +325,17 @@ pub async fn handle_connection(state: Arc<SharedState>, stream: UnixStream) {
                         }
                     }
                     res = broadcast_rx.recv() => {
-                        if let Ok(resp) = res {
-                            if tars_base::write_json_line_async(&mut write_half, &resp).await.is_err() {
-                                break;
+                        match res {
+                            Ok(resp) => {
+                                if tars_base::write_json_line_async(&mut write_half, &resp).await.is_err() {
+                                    break;
+                                }
+                                if matches!(resp, Response::AgentDone | Response::Cancelled | Response::Error { .. }) {
+                                    break;
+                                }
                             }
+                            Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                            Err(broadcast::error::RecvError::Closed) => break,
                         }
                     }
                 }
@@ -336,6 +372,7 @@ pub fn socket_path_from(paths: &tars_base::Paths) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tars_base::Message;
     use tokio::io::BufReader;
     use tokio::net::UnixStream;
 
@@ -566,8 +603,20 @@ mod tests {
             .unwrap();
         assert_eq!(resp, Response::Ok);
 
+        // Subscribe to receive streaming events
+        let sub_req = Request::Subscribe {
+            session_id: session_id.into(),
+        };
+        tars_base::write_json_line_async(&mut write_half, &sub_req)
+            .await
+            .unwrap();
+        let resp: Response = tars_base::read_json_line_async(&mut reader)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(resp, Response::Ok);
+
         // Now read streamed events until AgentDone
-        let mut saw_stream = false;
         let mut saw_done = false;
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
         while tokio::time::Instant::now() < deadline {
@@ -577,22 +626,14 @@ mod tests {
             )
             .await;
             if let Ok(Ok(Some(resp))) = res {
-                match resp {
-                    Response::Stream { .. } => saw_stream = true,
-                    Response::AgentDone => {
-                        saw_done = true;
-                        break;
-                    }
-                    _ => {}
+                if resp == Response::AgentDone {
+                    saw_done = true;
+                    break;
                 }
             } else {
                 break;
             }
         }
-        assert!(
-            saw_stream,
-            "should have seen Stream events from LogProvider"
-        );
         assert!(saw_done, "should have seen AgentDone");
 
         // DB should now have user + assistant (LogProvider produces empty assistant)

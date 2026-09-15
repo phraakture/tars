@@ -65,11 +65,17 @@ pub async fn run_session_turn(
 
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(64);
     let state_clone = state.clone();
+    let sid = session_id.to_string();
     let forwarder = tokio::spawn(async move {
         while let Some(ev) = event_rx.recv().await {
-            let _ = state_clone.broadcast.send(Response::Stream {
-                event: Box::new(ev),
-            });
+            state_clone
+                .push_event(
+                    &sid,
+                    Response::Stream {
+                        event: Box::new(ev),
+                    },
+                )
+                .await;
         }
     });
 
@@ -97,15 +103,21 @@ pub async fn run_session_turn(
             for msg in &agent_result.new_messages {
                 db.append_message(session_id, msg)?;
             }
+            drop(db);
             // Broadcast terminal
-            let _ = state.broadcast.send(Response::AgentDone);
+            state.push_event(session_id, Response::AgentDone).await;
             Ok(agent_result)
         }
         Err(e) => {
-            let _ = state.broadcast.send(Response::Error {
-                kind: tars_base::protocol::ErrorKind::Internal,
-                message: e.to_string(),
-            });
+            state
+                .push_event(
+                    session_id,
+                    Response::Error {
+                        kind: tars_base::protocol::ErrorKind::Internal,
+                        message: e.to_string(),
+                    },
+                )
+                .await;
             Err(e)
         }
     }
