@@ -195,6 +195,62 @@ impl Db {
             .map_err(db_err("count messages"))?;
         Ok(count as usize)
     }
+
+    /// Replace messages from index 0..cut with new replacement messages.
+    /// Used for compaction: removes old messages and prepends a summary.
+    pub fn replace_messages(
+        &self,
+        session_id: &str,
+        cut: usize,
+        replacements: &[Message],
+    ) -> tars_base::Result<()> {
+        // Get message IDs to delete (first `cut` messages by id order)
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id FROM messages WHERE session_id = ?1 ORDER BY id LIMIT ?2")
+            .map_err(db_err("prepare replace_messages"))?;
+
+        let ids_to_delete: Vec<i64> = stmt
+            .query_map(params![session_id, cut as i64], |row| row.get(0))
+            .map_err(db_err("query ids"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(db_err("collect ids"))?;
+
+        drop(stmt);
+
+        if ids_to_delete.is_empty() {
+            return Ok(());
+        }
+
+        // Delete old messages
+        let placeholders: Vec<String> = ids_to_delete.iter().map(|_| "?".to_string()).collect();
+        let sql = format!(
+            "DELETE FROM messages WHERE id IN ({})",
+            placeholders.join(", ")
+        );
+        let params: Vec<&dyn rusqlite::types::ToSql> = ids_to_delete
+            .iter()
+            .map(|id| id as &dyn rusqlite::types::ToSql)
+            .collect();
+        self.conn
+            .execute(&sql, params.as_slice())
+            .map_err(db_err("delete old messages"))?;
+
+        // Insert replacement messages
+        let now = tars_base::timestamp_ms() as i64;
+        for msg in replacements {
+            let json =
+                serde_json::to_string(msg).map_err(|e| tars_base::Error::Parse(e.to_string()))?;
+            self.conn
+                .execute(
+                    "INSERT INTO messages (session_id, message_json, created_at) VALUES (?1, ?2, ?3)",
+                    params![session_id, json, now],
+                )
+                .map_err(db_err("insert replacement"))?;
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]

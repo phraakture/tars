@@ -13,6 +13,19 @@ enum Commands {
     Sessions,
     Models,
     Chat(ChatArgs),
+    Config(ConfigArgs),
+}
+
+#[derive(Parser)]
+struct ConfigArgs {
+    #[command(subcommand)]
+    cmd: ConfigCmd,
+}
+
+#[derive(Subcommand)]
+enum ConfigCmd {
+    /// Reload provider/model configuration from disk
+    Reload,
 }
 
 #[derive(Parser)]
@@ -147,6 +160,22 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
+        Some(Commands::Config(args)) => match args.cmd {
+            ConfigCmd::Reload => {
+                let paths = tars_base::Paths::detect();
+                let config = tars_base::config::load_config(&paths)?;
+                println!(
+                    "loaded {} provider(s) from {}",
+                    config.providers.len(),
+                    paths.providers_path().display()
+                );
+                for (name, p) in &config.providers {
+                    let models: Vec<&str> = p.models.iter().map(|m| m.id.as_str()).collect();
+                    println!("  {} ({}): {}", name, p.api, models.join(", "));
+                }
+                println!("config reload complete (registry swap requires restart)");
+            }
+        },
         None => {
             println!(
                 "tars: use 'tars chat -m \"hello\"' to talk, or 'tars server start --foreground' to run the daemon"
@@ -200,14 +229,37 @@ async fn start_server_daemon(paths: &tars_base::Paths) -> anyhow::Result<()> {
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+
+    // Check for existing instance via PID file
+    let pid_path = paths.pid_path();
+    if pid_path.exists() {
+        if let Ok(contents) = std::fs::read_to_string(&pid_path) {
+            if let Ok(pid) = contents.trim().parse::<u32>() {
+                // Check if process is still running
+                if std::process::Command::new("kill")
+                    .args(["-0", &pid.to_string()])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false)
+                {
+                    anyhow::bail!("server already running (pid {})", pid);
+                }
+            }
+        }
+        // Stale PID file — remove it
+        let _ = std::fs::remove_file(&pid_path);
+    }
+
+    // Remove stale socket
     let _ = std::fs::remove_file(&socket_path);
 
     let db = tars_lib::db::Db::open(&db_path)?;
     let state = std::sync::Arc::new(tars_lib::server::SharedState::new(db));
     let listener = tokio::net::UnixListener::bind(&socket_path)?;
 
-    // Write pid
-    let pid_path = paths.pid_path();
+    // Write PID file
     if let Some(parent) = pid_path.parent() {
         std::fs::create_dir_all(parent)?;
     }

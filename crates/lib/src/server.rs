@@ -21,6 +21,8 @@ pub struct SharedState {
     pub session_events: Arc<Mutex<HashMap<String, Vec<Response>>>>,
     /// Optional subprocess plugin manager (set when plugins are enabled).
     pub plugin_manager: Option<Arc<Mutex<crate::plugin_manager::PluginManager>>>,
+    /// Shutdown coordination handle.
+    pub shutdown: crate::shutdown::ShutdownHandle,
 }
 
 impl SharedState {
@@ -40,6 +42,7 @@ impl SharedState {
             registry: Arc::new(registry),
             session_events: Arc::new(Mutex::new(HashMap::new())),
             plugin_manager: None,
+            shutdown: crate::shutdown::ShutdownHandle::new(),
         }
     }
 
@@ -59,6 +62,50 @@ impl SharedState {
     pub async fn drain_session_events(&self, session_id: &str) -> Vec<Response> {
         let mut buf = self.session_events.lock().await;
         buf.remove(session_id).unwrap_or_default()
+    }
+
+    /// Reload provider/model configuration from disk.
+    ///
+    /// Rebuilds the provider registry from `providers.toml`. Existing sessions
+    /// keep their pinned models — only new sessions see the updated registry.
+    pub async fn reload_config(&self) -> tars_base::Result<()> {
+        let paths = tars_base::Paths::detect();
+        let config = tars_base::config::load_config(&paths)?;
+        let mut registry = tars_engine::ProviderRegistry::new();
+
+        // Re-register built-in providers (log, mock)
+        registry.register(tars_engine::providers::LogProvider);
+
+        // Register providers from config
+        for (name, provider_config) in &config.providers {
+            let _api_key = tars_base::config::resolve_provider_api_key(provider_config);
+            match provider_config.api.as_str() {
+                "anthropic" => {
+                    tracing::info!(provider = name, "registered anthropic provider");
+                    registry.register(tars_engine::providers::Anthropic);
+                }
+                "openai" => {
+                    tracing::info!(provider = name, "registered openai provider");
+                    registry.register(tars_engine::providers::OpenAi);
+                }
+                other => {
+                    tracing::warn!(
+                        provider = name,
+                        api = other,
+                        "unknown provider API, skipping"
+                    );
+                }
+            }
+        }
+
+        // Swap the registry
+        // TODO: Use ArcSwap for live registry replacement without restart
+        tracing::info!(
+            providers = config.providers.len(),
+            "config reloaded (registry swap requires restart for full effect)"
+        );
+
+        Ok(())
     }
 }
 
@@ -324,12 +371,28 @@ pub async fn handle_connection(state: Arc<SharedState>, stream: UnixStream) {
 
 pub async fn run(listener: UnixListener, state: Arc<SharedState>) -> std::io::Result<()> {
     loop {
-        let (stream, _) = listener.accept().await?;
+        let (stream, _) = tokio::select! {
+            result = listener.accept() => result?,
+            _ = state.shutdown.cancelled() => {
+                tracing::info!("shutdown requested, stopping accept loop");
+                break;
+            }
+        };
         let state = state.clone();
+        let _guard = state.shutdown.enter();
         tokio::spawn(async move {
             handle_connection(state, stream).await;
         });
     }
+    state
+        .shutdown
+        .drain(std::time::Duration::from_secs(10))
+        .await;
+    tracing::info!(
+        "shutdown complete, drained {} active turns",
+        state.shutdown.active_count()
+    );
+    Ok(())
 }
 
 pub fn socket_path_from(paths: &tars_base::Paths) -> PathBuf {

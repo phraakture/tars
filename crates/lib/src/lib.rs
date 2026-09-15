@@ -6,5 +6,7 @@
 
 pub mod agent_runner;
 pub mod db;
+pub mod logging;
 pub mod plugin_manager;
 pub mod server;
+pub mod shutdown;

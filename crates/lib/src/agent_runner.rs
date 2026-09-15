@@ -3,6 +3,9 @@ use std::sync::Arc;
 use tars_base::{CancelToken, Context, Message, StreamOptions, UserMessage};
 use tars_engine::ProviderRegistry;
 use tars_engine::agent::{AgentConfig, AgentResult, needs_continuation, repair_messages};
+use tars_engine::compaction::{
+    CompactionSettings, estimate_context_tokens, find_cut_point, should_compact, summarize,
+};
 use tars_plugin::ToolExecutor;
 use tars_plugin_worker::InProcessWorker;
 
@@ -121,6 +124,55 @@ pub async fn run_session_turn(
                 db.append_message(session_id, msg)?;
             }
             drop(db);
+
+            // Check if compaction is needed
+            let should_compact_now = {
+                let db = state.db.lock().await;
+                let all_msgs = db.get_messages(session_id)?;
+                let ctx_tokens = estimate_context_tokens(&all_msgs);
+                let settings = CompactionSettings::default();
+                should_compact(ctx_tokens, model.context_window, &settings)
+            };
+
+            if should_compact_now {
+                tracing::info!(session_id, "context window full, running compaction");
+                let all_msgs = {
+                    let db = state.db.lock().await;
+                    db.get_messages(session_id)?
+                };
+
+                let settings = CompactionSettings::default();
+                let cut = find_cut_point(&all_msgs, settings.keep_recent_tokens);
+                if cut > 0 {
+                    let to_summarize = &all_msgs[..cut];
+                    match summarize(
+                        &model,
+                        to_summarize,
+                        registry,
+                        &StreamOptions::default(),
+                        None,
+                    )
+                    .await
+                    {
+                        Ok(summary) => {
+                            use tars_base::CompactionSummaryMessage;
+                            let summary_msg =
+                                Message::CompactionSummary(CompactionSummaryMessage {
+                                    summary,
+                                    tokens_before: estimate_context_tokens(to_summarize),
+                                    timestamp: tars_base::timestamp_ms(),
+                                });
+                            let db = state.db.lock().await;
+                            db.replace_messages(session_id, cut, &[summary_msg])?;
+                            tracing::info!(session_id, cut, "compaction complete");
+                        }
+                        Err(e) => {
+                            tracing::warn!(session_id, %e, "compaction summarization failed");
+                        }
+                    }
+                }
+            }
+
             // Broadcast terminal
             state.push_event(session_id, Response::AgentDone).await;
             Ok(agent_result)
