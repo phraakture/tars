@@ -1,3 +1,4 @@
+#![allow(clippy::manual_range_contains)]
 use std::time::Duration;
 use tars_base::{CancelToken, Error, StreamEvent};
 

@@ -9,6 +9,7 @@ mod provider;
 pub use provider::{EventReceiver, EventSender, Provider, ProviderRegistry, STREAM_CAPACITY};
 
 pub mod agent;
+pub mod compaction;
 pub mod providers;
 pub mod retry;
 pub mod system_prompt;
