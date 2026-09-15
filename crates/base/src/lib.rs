@@ -11,6 +11,15 @@ pub use error::{Error, Result};
 mod types;
 pub use types::*;
 
+mod paths;
+pub use paths::Paths;
+
+/// Provider/model configuration files (`providers.toml`, `models.toml`).
+pub mod config;
+
+/// Model id / alias → `Model` resolution.
+pub mod model_resolve;
+
 /// Client↔server wire protocol (JSON-lines over the socket).
 pub mod protocol;
 
