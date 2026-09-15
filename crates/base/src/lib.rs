@@ -8,6 +8,9 @@
 mod error;
 pub use error::{Error, Result};
 
+mod types;
+pub use types::*;
+
 use std::time::{SystemTime, UNIX_EPOCH};
 
 // ---------------------------------------------------------------------------
