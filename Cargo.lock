@@ -1349,6 +1349,9 @@ dependencies = [
  "serde",
  "serde_json",
  "tars-base",
+ "tars-engine",
+ "tars-lib",
+ "tempfile",
  "thiserror",
  "tokio",
  "tracing",
@@ -1377,6 +1380,7 @@ name = "tars-lib"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "futures",
  "rusqlite",
  "serde",
@@ -1431,6 +1435,18 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "tars-worker"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tars-base",
+ "tars-plugin",
+ "tars-plugin-worker",
+ "tokio",
 ]
 
 [[package]]

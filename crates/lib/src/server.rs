@@ -19,6 +19,8 @@ pub struct SharedState {
     pub registry: Arc<tars_engine::ProviderRegistry>,
     /// Per-session event buffer: agent runner pushes here, Subscribe drains first.
     pub session_events: Arc<Mutex<HashMap<String, Vec<Response>>>>,
+    /// Optional subprocess plugin manager (set when plugins are enabled).
+    pub plugin_manager: Option<Arc<Mutex<crate::plugin_manager::PluginManager>>>,
 }
 
 impl SharedState {
@@ -37,6 +39,7 @@ impl SharedState {
             broadcast: tx,
             registry: Arc::new(registry),
             session_events: Arc::new(Mutex::new(HashMap::new())),
+            plugin_manager: None,
         }
     }
 

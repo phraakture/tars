@@ -5,9 +5,11 @@
 //! to speak to the server.
 
 pub mod executor;
+pub mod protocol;
 pub mod tool_prompt;
 
 pub use executor::{ToolExecutor, spawn_output_forwarder};
+pub use protocol::*;
 pub use tool_prompt::ToolPrompt;
 
 /// Built-in tool prompts for the default tools (bash, read, edit, write).

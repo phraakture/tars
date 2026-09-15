@@ -6,4 +6,5 @@
 
 pub mod agent_runner;
 pub mod db;
+pub mod plugin_manager;
 pub mod server;

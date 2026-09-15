@@ -3,6 +3,7 @@ use std::sync::Arc;
 use tars_base::{CancelToken, Context, Message, StreamOptions, UserMessage};
 use tars_engine::ProviderRegistry;
 use tars_engine::agent::{AgentConfig, AgentResult, needs_continuation, repair_messages};
+use tars_plugin::ToolExecutor;
 use tars_plugin_worker::InProcessWorker;
 
 use crate::server::SharedState;
@@ -58,7 +59,23 @@ pub async fn run_session_turn(
     };
 
     let cwd_str = cwd.unwrap_or_else(|| "/tmp".to_string());
-    let mut worker = InProcessWorker::new(cwd_str);
+
+    // Choose executor: subprocess plugin manager if available, otherwise in-process worker
+    let use_subprocess = state.plugin_manager.is_some();
+    let mut _subprocess_executor: Option<crate::plugin_manager::SubprocessExecutor> = None;
+    let mut _in_process_worker: Option<InProcessWorker> = None;
+    let executor: &mut dyn ToolExecutor = if use_subprocess {
+        let pm = state.plugin_manager.as_ref().unwrap().clone();
+        let cwd = cwd_str.clone();
+        _subprocess_executor = Some(crate::plugin_manager::SubprocessExecutor {
+            plugin_manager: pm,
+            cwd,
+        });
+        _subprocess_executor.as_mut().unwrap()
+    } else {
+        _in_process_worker = Some(InProcessWorker::new(cwd_str));
+        _in_process_worker.as_mut().unwrap()
+    };
 
     let options = StreamOptions::default();
     let config = AgentConfig::default();
@@ -83,7 +100,7 @@ pub async fn run_session_turn(
         &model,
         &mut context,
         registry,
-        &mut worker,
+        executor,
         &options,
         &config,
         cancel,
@@ -312,5 +329,79 @@ mod tests {
         let final_msgs = state.db.lock().await.get_messages(session_id).unwrap();
         // Should be: assistant orphan + stub + user continue + assistant recovered
         assert_eq!(final_msgs.len(), 4);
+    }
+
+    /// Phase 6 gate: e2e through subprocess transport.
+    /// Verifies that a tool call routes through the subprocess worker and returns a result.
+    #[tokio::test]
+    async fn e2e_subprocess_tool_call() {
+        let exe = {
+            let mut path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+            path.pop();
+            path.pop();
+            path.push("target/debug/tars-worker");
+            path.to_string_lossy().to_string()
+        };
+        if !std::path::Path::new(&exe).exists() {
+            eprintln!("skipping e2e_subprocess_tool_call: tars-worker binary not built");
+            return;
+        }
+
+        let mut pm = crate::plugin_manager::PluginManager::new();
+        pm.spawn_plugin(&[exe], "/tmp").unwrap();
+
+        let db = Db::open_memory().unwrap();
+        let mut state = SharedState::new(db);
+        state.plugin_manager = Some(Arc::new(tokio::sync::Mutex::new(pm)));
+        let state = Arc::new(state);
+
+        let session_id = "s6";
+        {
+            let db = state.db.lock().await;
+            db.create_session(&crate::db::StoredSession {
+                id: session_id.into(),
+                model: mock_model(),
+                system_prompt: None,
+                cwd: Some("/tmp".into()),
+                created_at: tars_base::timestamp_ms() as i64,
+            })
+            .unwrap();
+        }
+
+        // Mock returns a tool call → the runner dispatches through subprocess → returns result
+        let mut registry = ProviderRegistry::new();
+        registry.register(MockProvider::new(vec![
+            MockResponse::ToolCalls(vec![ToolCall {
+                id: "tc_sub".into(),
+                name: "bash".into(),
+                arguments: serde_json::json!({"command": "echo subprocess_ok"}),
+            }]),
+            MockResponse::Text("subprocess done".into()),
+        ]));
+
+        let cancel = CancelToken::new();
+        let result = run_session_turn(state.clone(), &registry, session_id, "run bash", &cancel)
+            .await
+            .unwrap();
+
+        // Should have: assistant tool_use, tool_result, assistant text
+        assert_eq!(result.new_messages.len(), 3);
+
+        // Verify the tool result came from the subprocess (contains "subprocess_ok")
+        let tool_result = &result.new_messages[1];
+        match tool_result {
+            Message::ToolResult(tr) => {
+                let text: String = tr.content.iter().map(|c| c.text().to_string()).collect();
+                assert!(
+                    text.contains("subprocess_ok"),
+                    "tool result should come from subprocess, got: {text}"
+                );
+            }
+            other => panic!("expected ToolResult, got: {:?}", other),
+        }
+
+        // DB should have user + 3 agent messages
+        let msgs = state.db.lock().await.get_messages(session_id).unwrap();
+        assert_eq!(msgs.len(), 4);
     }
 }
