@@ -2,7 +2,7 @@
   <img src="assets/banner.jpg?v=1" alt="tars" width="100%">
 </p>
 
-A Rust agent harness for LLM-powered coding assistance.
+A Rust agent harness for LLM-powered coding assistance, with an interactive terminal UI.
 
 ## Features
 
@@ -11,6 +11,7 @@ A Rust agent harness for LLM-powered coding assistance.
 - **Session persistence**: SQLite-backed storage with automatic crash recovery
 - **Client/server design**: Unix socket transport with a typed JSON-line protocol
 - **Context compaction**: automatic summarization when the context window fills
+- **Terminal UI**: session picker, live streaming chat, and scrolling transcript
 - **Graceful shutdown**: in-flight turns are drained before process exit
 
 ## Quickstart
@@ -39,6 +40,12 @@ Start an interactive REPL:
 cargo run -- chat
 ```
 
+Or open the full terminal UI with a session picker and live streaming:
+
+```bash
+cargo run -- tui
+```
+
 ## Crate Structure
 
 | Crate | Purpose |
@@ -50,6 +57,7 @@ cargo run -- chat
 | `tars-worker` | Subprocess worker binary |
 | `tars-lib` | Server daemon, database, agent runner, plugin manager |
 | `tars-client` | Client library for Unix socket communication |
+| `tars-tui` | Ratatui terminal interface |
 | `tars-agent` | CLI binary (`tars` command) |
 
 ## Configuration
@@ -71,6 +79,7 @@ See [docs/CONFIG.md](docs/CONFIG.md) for the full configuration reference, inclu
 | `tars chat -m "text"` | One-shot message; auto-starts the server |
 | `tars chat -M <model>` | Use a specific model |
 | `tars chat` | Interactive REPL |
+| `tars tui` | Terminal UI: session picker and live streaming chat |
 | `tars sessions` | List sessions |
 | `tars models` | List registered models |
 | `tars config reload` | Re-read and summarize provider configuration |

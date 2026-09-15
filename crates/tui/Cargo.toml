@@ -1,6 +1,6 @@
 [package]
-name = "tars-agent"
-description = "The tars agent CLI"
+name = "tars-tui"
+description = "Terminal UI for tars (Ratatui)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,8 +10,10 @@ license.workspace = true
 tars-base = { workspace = true }
 tars-client = { workspace = true }
 tars-lib = { workspace = true }
-anyhow = { workspace = true }
+ratatui = { workspace = true }
+crossterm = { workspace = true }
 tokio = { workspace = true }
+anyhow = { workspace = true }
+serde_json = { workspace = true }
+futures = { workspace = true }
 tracing = { workspace = true }
-clap = { workspace = true }
-tars-tui = { workspace = true }

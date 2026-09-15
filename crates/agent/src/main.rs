@@ -14,6 +14,8 @@ enum Commands {
     Models,
     Chat(ChatArgs),
     Config(ConfigArgs),
+    /// Interactive terminal UI
+    Tui,
 }
 
 #[derive(Parser)]
@@ -160,6 +162,9 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
+        Some(Commands::Tui) => {
+            tars_tui::run().await?;
+        }
         Some(Commands::Config(args)) => match args.cmd {
             ConfigCmd::Reload => {
                 let paths = tars_base::Paths::detect();
@@ -198,86 +203,7 @@ fn print_stream_text(event: &tars_base::StreamEvent) {
 }
 async fn connect_or_start() -> anyhow::Result<tars_client::Client> {
     let paths = tars_base::Paths::detect();
-    let socket_path = paths.socket_path();
-
-    // Try connecting first
-    if let Ok(client) = tars_client::Client::connect(&socket_path).await {
-        return Ok(client);
-    }
-
-    // Server not running — start it
-    eprintln!("Starting tars server...");
-    start_server_daemon(&paths).await?;
-
-    // Wait for socket to appear
-    for _ in 0..50 {
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        if let Ok(client) = tars_client::Client::connect(&socket_path).await {
-            return Ok(client);
-        }
-    }
-    anyhow::bail!("server did not start within 5s")
-}
-
-async fn start_server_daemon(paths: &tars_base::Paths) -> anyhow::Result<()> {
-    let socket_path = paths.socket_path();
-    let db_path = paths.data_dir().join("tars.db");
-
-    if let Some(parent) = socket_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    if let Some(parent) = db_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    // Check for existing instance via PID file
-    let pid_path = paths.pid_path();
-    if pid_path.exists() {
-        if let Ok(contents) = std::fs::read_to_string(&pid_path) {
-            if let Ok(pid) = contents.trim().parse::<u32>() {
-                // Check if process is still running
-                if std::process::Command::new("kill")
-                    .args(["-0", &pid.to_string()])
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status()
-                    .map(|s| s.success())
-                    .unwrap_or(false)
-                {
-                    anyhow::bail!("server already running (pid {})", pid);
-                }
-            }
-        }
-        // Stale PID file — remove it
-        let _ = std::fs::remove_file(&pid_path);
-    }
-
-    // Remove stale socket
-    let _ = std::fs::remove_file(&socket_path);
-
-    let db = tars_lib::db::Db::open(&db_path)?;
-    let state = std::sync::Arc::new(tars_lib::server::SharedState::new(db));
-    let listener = tokio::net::UnixListener::bind(&socket_path)?;
-
-    // Write PID file
-    if let Some(parent) = pid_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(&pid_path, std::process::id().to_string())?;
-
-    // Run server in background (this task will be detached)
-    let sock = socket_path.clone();
-    let pid = pid_path.clone();
-    tokio::spawn(async move {
-        match tars_lib::server::run(listener, state).await {
-            Ok(()) => {}
-            Err(e) => eprintln!("server error: {e}"),
-        }
-        let _ = std::fs::remove_file(&sock);
-        let _ = std::fs::remove_file(&pid);
-    });
-
-    Ok(())
+    tars_lib::daemon::connect_or_start(&paths).await
 }
 
 async fn run_server(foreground: bool) -> anyhow::Result<()> {

@@ -8,6 +8,7 @@ license.workspace = true
 
 [dependencies]
 tars-base = { workspace = true }
+tars-client = { workspace = true }
 tars-engine = { workspace = true }
 tars-plugin = { workspace = true }
 tars-plugin-worker = { workspace = true }

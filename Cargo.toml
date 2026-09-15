@@ -24,6 +24,7 @@ tars-lib = { path = "crates/lib", version = "0.1.0" }
 tars-plugin = { path = "crates/plugin", version = "0.1.0" }
 tars-plugin-tasks = { path = "crates/plugin-tasks", version = "0.1.0" }
 tars-plugin-worker = { path = "crates/plugin-worker", version = "0.1.0" }
+tars-tui = { path = "crates/tui", version = "0.1.0" }
 
 # external deps — centralized here, crates use `workspace = true`
 serde = { version = "1", features = ["derive"] }
@@ -44,3 +45,5 @@ chrono = "0.4"
 base64 = "0.22"
 rusqlite = { version = "0.31", features = ["bundled"] }
 clap = { version = "4", features = ["derive"] }
+ratatui = "0.30"
+crossterm = { version = "0.29", features = ["event-stream"] }

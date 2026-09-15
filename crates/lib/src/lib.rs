@@ -5,6 +5,7 @@
 //! plugin manager. Also bundles the `tars worker` plugin binary.
 
 pub mod agent_runner;
+pub mod daemon;
 pub mod db;
 pub mod logging;
 pub mod plugin_manager;
