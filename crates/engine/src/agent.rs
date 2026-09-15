@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use tars_base::{
     AssistantContent, CancelToken, Context, Message, Model, StopReason, StreamEvent, StreamOptions,
     ToolCall, ToolResultMessage,
@@ -7,6 +9,12 @@ use tars_plugin::ToolExecutor;
 use crate::ProviderRegistry;
 use crate::retry::{classify_error, retry_countdown};
 use tars_base::AgentPhase;
+
+async fn wait_cancel(cancel: &CancelToken) {
+    while !cancel.is_cancelled() {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Config / Result
@@ -55,8 +63,8 @@ pub fn needs_continuation(messages: &[Message]) -> bool {
     matches!(messages.last(), Some(Message::ToolResult(_)))
 }
 
-/// Repair a history corrupted by a crash. See `tau`'s `repair_messages` for
-/// rationale — we synthesize error `ToolResult` stubs for orphaned `tool_use`s.
+/// Repair a history corrupted by a crash. We synthesize error
+/// `ToolResult` stubs for orphaned `tool_use`s left by an interrupted turn.
 pub fn repair_messages(messages: &[Message]) -> Vec<Message> {
     if messages.is_empty() {
         return Vec::new();
@@ -215,7 +223,14 @@ pub async fn run(
                     // Forward provider events, capture terminal message
                     let mut inner_terminal: Option<(StopReason, tars_base::AssistantMessage)> =
                         None;
-                    while let Some(ev) = rx.recv().await {
+                    loop {
+                        let ev_opt = tokio::select! {
+                            ev = rx.recv() => ev,
+                            _ = wait_cancel(cancel) => None,
+                        };
+                        let Some(ev) = ev_opt else {
+                            break;
+                        };
                         let is_done = matches!(ev, StreamEvent::Done { .. });
                         let is_error = matches!(ev, StreamEvent::Error { .. });
                         let _ = event_tx.send(ev.clone()).await;
@@ -230,12 +245,13 @@ pub async fn run(
                             }
                             _ => {}
                         }
-                        if cancel.is_cancelled() {
-                            break;
-                        }
                         if is_done || is_error {
                             break;
                         }
+                    }
+                    if cancel.is_cancelled() && inner_terminal.is_none() {
+                        terminal = None;
+                        break;
                     }
                     terminal = inner_terminal;
                     break;
@@ -243,8 +259,7 @@ pub async fn run(
             }
         }
 
-        if cancel.is_cancelled() {
-            // synthesize stubs for any orphan tool_calls? For now just abort
+        if cancel.is_cancelled() && terminal.is_none() {
             return Ok(AgentResult {
                 new_messages,
                 reason: StopReason::Aborted,
@@ -849,5 +864,120 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(result.reason, StopReason::Aborted);
+    }
+
+    #[tokio::test]
+    async fn cancel_during_hang_stream_aborts() {
+        let mock = MockProvider::new(vec![MockResponse::Hang]);
+        let mut registry = ProviderRegistry::new();
+        registry.register(mock);
+        let mut ctx = Context {
+            messages: vec![Message::User(UserMessage::text("hang"))],
+            ..Default::default()
+        };
+        let model = mock_model();
+        let mut executor = EchoExecutor;
+        let cancel = CancelToken::new();
+        let cancel_clone = cancel.clone();
+        let (event_tx, _) = tokio::sync::mpsc::channel(64);
+        // cancel after 50ms while provider hangs
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            cancel_clone.cancel();
+        });
+        let start = tokio::time::Instant::now();
+        let result = run(
+            &model,
+            &mut ctx,
+            &registry,
+            &mut executor,
+            &StreamOptions::default(),
+            &AgentConfig {
+                turn_limit: 5,
+                ..Default::default()
+            },
+            &cancel,
+            &event_tx,
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.reason, StopReason::Aborted);
+        // should abort quickly, not hang for seconds
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(1),
+            "cancel should abort Hang quickly"
+        );
+        // no partial assistant should be persisted (Hang never reached Done)
+        assert!(result.new_messages.is_empty());
+        assert!(ctx.messages.len() == 1); // only original user message
+    }
+
+    #[tokio::test]
+    async fn cancel_synthesizes_stubs_for_remaining_tools() {
+        let mock = MockProvider::new(vec![MockResponse::ToolCalls(vec![
+            ToolCall {
+                id: "tc1".into(),
+                name: "bash".into(),
+                arguments: serde_json::json!({}),
+            },
+            ToolCall {
+                id: "tc2".into(),
+                name: "bash".into(),
+                arguments: serde_json::json!({}),
+            },
+        ])]);
+        let mut registry = ProviderRegistry::new();
+        registry.register(mock);
+        let mut ctx = Context {
+            messages: vec![Message::User(UserMessage::text("hi"))],
+            ..Default::default()
+        };
+        let model = mock_model();
+        // Executor that cancels token on first call
+        struct CancelOnFirst;
+        #[async_trait::async_trait]
+        impl ToolExecutor for CancelOnFirst {
+            async fn execute(
+                &mut self,
+                tool_call: &ToolCall,
+                _output_tx: &tokio::sync::mpsc::Sender<String>,
+                cancel: &CancelToken,
+            ) -> tars_base::Result<ToolResultMessage> {
+                // cancel after first tool starts
+                cancel.cancel();
+                // still execute first tool successfully
+                Ok(ToolResultMessage::success(
+                    tool_call.id.clone(),
+                    tool_call.name.clone(),
+                    "first ok",
+                ))
+            }
+        }
+        let mut executor = CancelOnFirst;
+        let cancel = CancelToken::new();
+        let (event_tx, _) = tokio::sync::mpsc::channel(64);
+        let result = run(
+            &model,
+            &mut ctx,
+            &registry,
+            &mut executor,
+            &StreamOptions::default(),
+            &AgentConfig::default(),
+            &cancel,
+            &event_tx,
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.reason, StopReason::Aborted);
+        // Should have assistant + first tool_result + stub for second
+        assert_eq!(result.new_messages.len(), 3);
+        assert!(matches!(
+            &result.new_messages[2],
+            Message::ToolResult(tr) if tr.tool_call_id == "tc2" && tr.is_error
+        ));
+        // persisted ctx should have same
+        assert_eq!(ctx.messages.len(), 4); // user + 3 new
     }
 }
