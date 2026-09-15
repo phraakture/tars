@@ -689,6 +689,7 @@ mod tests {
             last_activity: 0,
             parent_id: None,
             context_pct: None,
+            project_name: Some("tars".into()),
             tagline: Some("working on tests".into()),
             archived: false,
         }

@@ -247,6 +247,10 @@ pub struct SessionInfo {
     /// Context window usage as a percentage (0–100), if known.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_pct: Option<f64>,
+    /// Project this session works on (derived from its cwd); `None` when
+    /// the cwd has no project marker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_name: Option<String>,
     /// Short description of what this session is working on.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tagline: Option<String>,
@@ -313,6 +317,7 @@ mod tests {
             last_activity: 2000,
             parent_id: None,
             context_pct: None,
+            project_name: None,
             tagline: None,
             archived: false,
         }

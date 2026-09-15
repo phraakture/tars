@@ -20,6 +20,9 @@ pub mod config;
 /// Model id / alias → `Model` resolution.
 pub mod model_resolve;
 
+/// Project discovery (`.git` / `.tars` markers) and project-scoped config.
+pub mod project;
+
 /// Client↔server wire protocol (JSON-lines over the socket).
 pub mod protocol;
 

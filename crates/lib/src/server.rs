@@ -110,6 +110,13 @@ impl SharedState {
 }
 
 fn make_session_info(stored: &StoredSession, message_count: usize) -> SessionInfo {
+    // Derive the project from the session's cwd at read time; sessions
+    // created before discovery existed still get a name.
+    let project_name = stored
+        .cwd
+        .as_deref()
+        .and_then(|cwd| tars_base::project::discover(std::path::Path::new(cwd)))
+        .and_then(|p| p.name);
     SessionInfo {
         id: stored.id.clone(),
         model: stored.model.id.clone(),
@@ -131,6 +138,7 @@ fn make_session_info(stored: &StoredSession, message_count: usize) -> SessionInf
         last_activity: stored.created_at,
         parent_id: None,
         context_pct: None,
+        project_name,
         tagline: None,
         archived: false,
     }
@@ -164,10 +172,17 @@ pub async fn dispatch(state: Arc<SharedState>, req: Request) -> Response {
                 cwd: cwd.clone(),
                 created_at: tars_base::timestamp_ms() as i64,
             };
-            // override model if requested
+            // override model if requested; project-scoped aliases
+            // (operator tier > global tier) map the id when it is an alias.
             let mut stored = stored;
             if let Some(m) = model {
-                stored.model.id = m;
+                let paths = tars_base::Paths::detect();
+                stored.model.id = tars_base::project::alias_target_for_cwd(
+                    &m,
+                    cwd.as_deref().map(std::path::Path::new),
+                    &paths,
+                )
+                .unwrap_or(m);
             }
             let db = state.db.lock().await;
             match db.create_session(&stored) {

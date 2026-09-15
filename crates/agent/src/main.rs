@@ -79,9 +79,14 @@ async fn main() -> anyhow::Result<()> {
             } else {
                 for s in &sessions {
                     let tagline = s.tagline.as_deref().unwrap_or("");
+                    let project = s
+                        .project_name
+                        .as_deref()
+                        .map(|p| format!("  project={p}"))
+                        .unwrap_or_default();
                     println!(
-                        "{}  model={}  msgs={}  {}",
-                        s.id, s.model, s.message_count, tagline
+                        "{}  model={}  msgs={}{}  {}",
+                        s.id, s.model, s.message_count, project, tagline
                     );
                 }
             }

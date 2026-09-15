@@ -243,6 +243,7 @@ async fn create_session(control: &mut Client) -> anyhow::Result<tars_base::proto
         last_activity: 0,
         parent_id: None,
         context_pct: None,
+        project_name: None,
         tagline: None,
         archived: false,
     })

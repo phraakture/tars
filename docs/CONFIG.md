@@ -104,6 +104,8 @@ cheap = "openai/gpt-4.1-mini"
 
 A per-project override file is supported at `config_dir()/projects/{name}/models.toml`. Operator entries replace global entries with the same name; both maps are merged with operator priority.
 
+The project `{name}` comes from discovery: the nearest ancestor of the session's working directory containing a `.git` entry (directory, or file for worktrees and submodules) or a `.tars` directory. When a session is created in a project, alias resolution checks the operator tier first, then the global tier; non-alias model ids pass through unchanged. Sessions report the discovered project as `project_name` in `SessionInfo` and `tars sessions` shows it as `project=...`.
+
 ## Runtime Files
 
 | Path | Purpose |
