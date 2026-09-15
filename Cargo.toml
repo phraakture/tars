@@ -8,6 +8,9 @@ edition = "2024"
 rust-version = "1.85"
 license = "MIT"
 authors = ["phraakture"]
+repository = "https://github.com/phraakture/tars"
+homepage = "https://github.com/phraakture/tars"
+description = "A Rust agent harness for LLM-powered coding assistance"
 
 [workspace.dependencies]
 # internal crates — edges must form a DAG:
