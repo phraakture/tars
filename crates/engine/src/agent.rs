@@ -4,7 +4,7 @@ use tars_base::{
     AssistantContent, CancelToken, Context, Message, Model, StopReason, StreamEvent, StreamOptions,
     ToolCall, ToolResultMessage,
 };
-use tars_plugin::ToolExecutor;
+use tars_plugin::{ToolExecutor, spawn_output_forwarder};
 
 use crate::ProviderRegistry;
 use crate::retry::{classify_error, retry_countdown};
@@ -348,19 +348,8 @@ pub async fn run(
                 });
             }
 
-            let (output_tx, mut output_rx) = tokio::sync::mpsc::channel::<String>(32);
-            let event_tx_clone = event_tx.clone();
-            let tc_id = tc.id.clone();
-            let fwd = tokio::spawn(async move {
-                while let Some(delta) = output_rx.recv().await {
-                    let _ = event_tx_clone
-                        .send(StreamEvent::ToolOutputDelta {
-                            tool_call_id: tc_id.clone(),
-                            delta,
-                        })
-                        .await;
-                }
-            });
+            let (output_tx, output_rx) = tokio::sync::mpsc::channel::<String>(32);
+            let fwd = spawn_output_forwarder(output_rx, tc.id.clone(), event_tx.clone());
 
             let result = executor.execute(tc, &output_tx, cancel).await;
             drop(output_tx);

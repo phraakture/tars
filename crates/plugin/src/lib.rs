@@ -7,7 +7,7 @@
 pub mod executor;
 pub mod tool_prompt;
 
-pub use executor::ToolExecutor;
+pub use executor::{ToolExecutor, spawn_output_forwarder};
 pub use tool_prompt::ToolPrompt;
 
 /// Built-in tool prompts for the default tools (bash, read, edit, write).
