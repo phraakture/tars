@@ -11,6 +11,12 @@ pub use error::{Error, Result};
 mod types;
 pub use types::*;
 
+/// Client↔server wire protocol (JSON-lines over the socket).
+pub mod protocol;
+
+/// Human-readable formatting for stats/tokens (kept out of the protocol).
+pub mod display;
+
 use std::time::{SystemTime, UNIX_EPOCH};
 
 // ---------------------------------------------------------------------------

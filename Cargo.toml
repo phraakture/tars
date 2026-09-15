@@ -7,7 +7,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
-authors = ["tars contributors"]
+authors = ["phraakture"]
 
 [workspace.dependencies]
 # internal crates — edges must form a DAG:
