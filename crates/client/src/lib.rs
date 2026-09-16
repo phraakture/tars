@@ -169,6 +169,18 @@ impl Client {
             resp => Err(ClientError::Unexpected(resp)),
         }
     }
+
+    /// Request cancellation of a running agent turn.
+    pub async fn cancel_chat(&mut self, session_id: &str) -> Result<bool> {
+        let req = Request::CancelChat {
+            session_id: session_id.to_string(),
+        };
+        match self.send_and_recv(&req).await? {
+            Response::Cancelled => Ok(true),
+            Response::Ok => Ok(false),
+            resp => Err(ClientError::Unexpected(resp)),
+        }
+    }
 }
 
 #[cfg(test)]

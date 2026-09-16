@@ -113,7 +113,7 @@ fn draw_transcript(chat: &ChatState, frame: &mut Frame, area: ratatui::layout::R
                 ]));
             }
             crate::app::TranscriptLine::Assistant(text) => {
-                lines.push(Line::from(text.clone()));
+                lines.extend(crate::markdown::to_lines(text));
             }
             crate::app::TranscriptLine::Tool { name, is_error } => {
                 let (mark, color) = if *is_error {
@@ -141,8 +141,19 @@ fn draw_transcript(chat: &ChatState, frame: &mut Frame, area: ratatui::layout::R
         }
     }
 
+    if let Some(thinking) = &chat.thinking {
+        lines.push(Line::styled(
+            "thinking...",
+            ratatui::style::Style::default().add_modifier(ratatui::style::Modifier::DIM),
+        ));
+        lines.push(Line::styled(
+            thinking.clone(),
+            ratatui::style::Style::default().add_modifier(ratatui::style::Modifier::DIM),
+        ));
+    }
+
     if let Some(streaming) = &chat.streaming {
-        lines.push(Line::from(streaming.clone()));
+        lines.extend(crate::markdown::to_lines(streaming));
         lines.push(Line::from(Span::styled(
             "▌",
             ratatui::style::Style::default().fg(ratatui::style::Color::Cyan),
@@ -164,8 +175,11 @@ fn draw_transcript(chat: &ChatState, frame: &mut Frame, area: ratatui::layout::R
 
 /// Compute the scroll offset clamped so we never scroll past the content.
 fn total_lines_overflow(chat: &ChatState, visible: u16) -> u16 {
-    // Approximate: one render line per transcript entry plus streaming lines.
-    let mut count = chat.lines.len() as u16;
+    // Approximate: markdown averages ~2 render lines per entry.
+    let mut count = chat.lines.len() as u16 * 2;
+    if chat.thinking.is_some() {
+        count += 2;
+    }
     if chat.streaming.is_some() {
         count += 2;
     }
@@ -178,7 +192,7 @@ fn total_lines_overflow(chat: &ChatState, visible: u16) -> u16 {
 fn draw_input(chat: &ChatState, frame: &mut Frame, area: ratatui::layout::Rect) {
     let (title, style) = if chat.busy {
         (
-            " working... (esc disabled while busy) ",
+            " working... (esc cancel turn) ",
             ratatui::style::Style::default().fg(ratatui::style::Color::Yellow),
         )
     } else {

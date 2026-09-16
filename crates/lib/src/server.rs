@@ -23,6 +23,9 @@ pub struct SharedState {
     pub plugin_manager: Option<Arc<Mutex<crate::plugin_manager::PluginManager>>>,
     /// Shutdown coordination handle.
     pub shutdown: crate::shutdown::ShutdownHandle,
+    /// Cancel token for the currently running turn, per session. Replaced
+    /// at the start of each turn; `CancelChat` fires it.
+    pub session_cancels: Arc<Mutex<HashMap<String, tars_base::CancelToken>>>,
 }
 
 impl SharedState {
@@ -43,6 +46,7 @@ impl SharedState {
             session_events: Arc::new(Mutex::new(HashMap::new())),
             plugin_manager: None,
             shutdown: crate::shutdown::ShutdownHandle::new(),
+            session_cancels: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -279,7 +283,13 @@ pub async fn dispatch(state: Arc<SharedState>, req: Request) -> Response {
             let txt = text.clone();
             tokio::spawn(async move {
                 let cancel = tars_base::CancelToken::new();
-                let _ = crate::agent_runner::run_session_turn(
+                // Register so CancelChat can fire this turn's token.
+                state_clone
+                    .session_cancels
+                    .lock()
+                    .await
+                    .insert(sid.clone(), cancel.clone());
+                let result = crate::agent_runner::run_session_turn(
                     state_clone.clone(),
                     &state_clone.registry,
                     &sid,
@@ -287,6 +297,16 @@ pub async fn dispatch(state: Arc<SharedState>, req: Request) -> Response {
                     &cancel,
                 )
                 .await;
+                // Clear this turn's token only if it is still ours.
+                let mut cancels = state_clone.session_cancels.lock().await;
+                if let Some(current) = cancels.get(&sid)
+                    && Arc::ptr_eq(&current.flag(), &cancel.flag())
+                {
+                    cancels.remove(&sid);
+                }
+                if let Err(e) = result {
+                    tracing::warn!(session_id = %sid, %e, "agent turn failed");
+                }
             });
             Response::Ok
         }
@@ -295,7 +315,20 @@ pub async fn dispatch(state: Arc<SharedState>, req: Request) -> Response {
             let _ = session_id;
             Response::Ok
         }
-        Request::CancelChat { .. } => Response::Cancelled,
+        Request::CancelChat { session_id } => {
+            let cancelled =
+                if let Some(cancel) = state.session_cancels.lock().await.get(&session_id) {
+                    cancel.cancel();
+                    true
+                } else {
+                    false
+                };
+            if cancelled {
+                Response::Cancelled
+            } else {
+                Response::Ok
+            }
+        }
     }
 }
 
@@ -687,5 +720,40 @@ mod tests {
         // DB should now have user + assistant (LogProvider produces empty assistant)
         let msgs = state.db.lock().await.get_messages(session_id).unwrap();
         assert!(msgs.len() >= 2);
+    }
+
+    #[tokio::test]
+    async fn cancel_chat_fires_registered_token() {
+        let db = Db::open_memory().unwrap();
+        let state = Arc::new(SharedState::new(db));
+
+        // Simulate a running turn registering its token.
+        let token = tars_base::CancelToken::new();
+        state
+            .session_cancels
+            .lock()
+            .await
+            .insert("s_cancel".into(), token.clone());
+        assert!(!token.is_cancelled());
+
+        let resp = dispatch(
+            state.clone(),
+            Request::CancelChat {
+                session_id: "s_cancel".into(),
+            },
+        )
+        .await;
+        assert_eq!(resp, Response::Cancelled);
+        assert!(token.is_cancelled(), "token must be fired");
+
+        // Cancelling an idle session is a benign no-op.
+        let resp = dispatch(
+            state.clone(),
+            Request::CancelChat {
+                session_id: "s_not_running".into(),
+            },
+        )
+        .await;
+        assert_eq!(resp, Response::Ok);
     }
 }

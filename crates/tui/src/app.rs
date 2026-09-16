@@ -29,9 +29,9 @@ pub fn build_transcript(messages: &[Message]) -> Vec<TranscriptLine> {
                 let text: String = u
                     .content
                     .iter()
-                    .filter_map(|c| match c {
-                        UserContent::Text(t) => Some(t.text.as_str()),
-                        UserContent::Image(_) => Some("[image]"),
+                    .map(|c| match c {
+                        UserContent::Text(t) => t.text.as_str(),
+                        UserContent::Image(_) => "[image]",
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
@@ -49,9 +49,9 @@ pub fn build_transcript(messages: &[Message]) -> Vec<TranscriptLine> {
                 let text: String = tr
                     .content
                     .iter()
-                    .filter_map(|c| match c {
-                        ToolResultContent::Text(t) => Some(t.text.clone()),
-                        ToolResultContent::Image(_) => Some("[image]".into()),
+                    .map(|c| match c {
+                        ToolResultContent::Text(t) => t.text.clone(),
+                        ToolResultContent::Image(_) => "[image]".to_string(),
                     })
                     .collect::<Vec<_>>()
                     .join("");
@@ -76,6 +76,18 @@ pub fn build_transcript(messages: &[Message]) -> Vec<TranscriptLine> {
 // Chat screen state
 // ---------------------------------------------------------------------------
 
+/// Join a snapshot's thinking blocks (the current thinking text).
+fn thinking_text(msg: &tars_base::AssistantMessage) -> String {
+    msg.content
+        .iter()
+        .filter_map(|c| match c {
+            tars_base::AssistantContent::Thinking(t) => Some(t.thinking.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("")
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct ChatState {
     pub session_id: String,
@@ -85,6 +97,8 @@ pub struct ChatState {
     pub input: String,
     /// Text of the assistant message currently streaming in.
     pub streaming: Option<String>,
+    /// Extended-thinking text currently streaming in (rendered dim).
+    pub thinking: Option<String>,
     /// True while an agent turn is running.
     pub busy: bool,
     /// Lines scrolled up from the bottom (0 = pinned to bottom).
@@ -101,6 +115,7 @@ impl ChatState {
             lines: Vec::new(),
             input: String::new(),
             streaming: None,
+            thinking: None,
             busy: false,
             scroll: 0,
             error: None,
@@ -123,11 +138,15 @@ impl ChatState {
             | StreamEvent::TextEnd { partial, .. } => {
                 self.streaming = Some(partial.text());
             }
-            StreamEvent::ThinkingStart { .. }
-            | StreamEvent::ThinkingDelta { .. }
-            | StreamEvent::ThinkingEnd { .. }
-            | StreamEvent::ToolcallStart { .. }
-            | StreamEvent::ToolcallDelta { .. } => {}
+            StreamEvent::ThinkingStart { partial, .. }
+            | StreamEvent::ThinkingDelta { partial, .. } => {
+                self.streaming = None;
+                self.thinking = Some(thinking_text(partial));
+            }
+            StreamEvent::ThinkingEnd { .. } => {
+                self.thinking = None;
+            }
+            StreamEvent::ToolcallStart { .. } | StreamEvent::ToolcallDelta { .. } => {}
             StreamEvent::ToolcallEnd { tool_call, .. } => {
                 self.flush_streaming();
                 self.lines.push(TranscriptLine::Tool {
@@ -180,6 +199,7 @@ impl ChatState {
     /// history reload; clear the live view state.
     pub fn finish_turn(&mut self) {
         self.streaming = None;
+        self.thinking = None;
         self.busy = false;
         self.scroll = 0;
     }
@@ -255,6 +275,7 @@ pub enum ChatAction {
     None,
     Quit,
     Back,
+    Cancel,
     Send(String),
 }
 
@@ -314,7 +335,7 @@ impl App {
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => ChatAction::Quit,
             (KeyCode::Esc, _) => {
                 if chat.busy {
-                    ChatAction::None
+                    ChatAction::Cancel
                 } else {
                     ChatAction::Back
                 }
@@ -640,11 +661,11 @@ mod tests {
         app.handle_chat_key(key(KeyCode::Char('y')));
         assert_eq!(app.handle_chat_key(key(KeyCode::Esc)), ChatAction::Back);
 
-        // But not while busy
+        // While busy, Esc cancels the turn instead.
         if let Screen::Chat(chat) = &mut app.screen {
             chat.busy = true;
         }
-        assert_eq!(app.handle_chat_key(key(KeyCode::Esc)), ChatAction::None);
+        assert_eq!(app.handle_chat_key(key(KeyCode::Esc)), ChatAction::Cancel);
     }
 
     #[test]

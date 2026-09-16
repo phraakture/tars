@@ -6,6 +6,7 @@
 //! event loop only.
 
 mod app;
+mod markdown;
 mod ui;
 
 use std::io::stdout;
@@ -73,61 +74,67 @@ async fn event_loop(
         tokio::select! {
             maybe_event = events.next() => {
                 let Some(event) = maybe_event else { break };
-                match event? {
-                    Event::Key(key) => {
-                        match handle_key(&mut app, key) {
-                            LoopAction::None => {}
-                            LoopAction::Quit => {
-                                app.running = false;
-                                break;
-                            }
-                            LoopAction::RefreshSessions => {
-                                refresh_sessions(&mut control, &mut app).await;
-                            }
-                            LoopAction::NewSession => {
-                                match create_session(&mut control).await {
-                                    Ok(info) => {
-                                        let chat = ChatState::new(&info.id, info.model.clone());
-                                        app.screen = Screen::Chat(Box::new(chat));
-                                        load_history(&mut control, &mut app).await;
-                                    }
-                                    Err(e) => app.picker.error = Some(e.to_string()),
+                let Event::Key(key) = event? else { continue };
+                match handle_key(&mut app, key) {
+                    LoopAction::None => {}
+                    LoopAction::Quit => {
+                        app.running = false;
+                        break;
+                    }
+                    LoopAction::RefreshSessions => {
+                        refresh_sessions(&mut control, &mut app).await;
+                    }
+                    LoopAction::NewSession => match create_session(&mut control).await {
+                        Ok(info) => {
+                            let chat = ChatState::new(&info.id, info.model.clone());
+                            app.screen = Screen::Chat(Box::new(chat));
+                            load_history(&mut control, &mut app).await;
+                        }
+                        Err(e) => app.picker.error = Some(e.to_string()),
+                    },
+                    LoopAction::Open(index) => {
+                        if let Some(info) = app.picker.sessions.get(index).cloned() {
+                            let chat = ChatState::new(&info.id, info.model.clone());
+                            app.screen = Screen::Chat(Box::new(chat));
+                            load_history(&mut control, &mut app).await;
+                        }
+                    }
+                    LoopAction::Back => {
+                        app.screen = Screen::Picker;
+                        refresh_sessions(&mut control, &mut app).await;
+                    }
+                    LoopAction::Cancel => {
+                        let Screen::Chat(chat) = &mut app.screen else { unreachable!() };
+                        let session_id = chat.session_id.clone();
+                        match Client::connect(socket_path).await {
+                            Ok(mut c) => {
+                                if let Err(e) = c.cancel_chat(&session_id).await {
+                                    chat.error = Some(e.to_string());
                                 }
                             }
-                            LoopAction::Open(index) => {
-                                if let Some(info) = app.picker.sessions.get(index).cloned() {
-                                    let chat = ChatState::new(&info.id, info.model.clone());
-                                    app.screen = Screen::Chat(Box::new(chat));
-                                    load_history(&mut control, &mut app).await;
+                            Err(e) => chat.error = Some(e.to_string()),
+                        }
+                    }
+                    LoopAction::Send(text) => {
+                        let Screen::Chat(chat) = &mut app.screen else { unreachable!() };
+                        let session_id = chat.session_id.clone();
+                        chat.busy = true;
+                        chat.error = None;
+                        // New connection per turn: Client::chat consumes it.
+                        match Client::connect(socket_path).await {
+                            Ok(c) => match c.chat(&session_id, &text).await {
+                                Ok(rx) => stream_rx = Some(rx),
+                                Err(e) => {
+                                    chat.busy = false;
+                                    chat.error = Some(e.to_string());
                                 }
-                            }
-                            LoopAction::Back => {
-                                app.screen = Screen::Picker;
-                                refresh_sessions(&mut control, &mut app).await;
-                            }
-                            LoopAction::Send(text) => {
-                                let Screen::Chat(chat) = &mut app.screen else { unreachable!() };
-                                let session_id = chat.session_id.clone();
-                                chat.busy = true;
-                                chat.error = None;
-                                // New connection per turn: Client::chat consumes it.
-                                match Client::connect(socket_path).await {
-                                    Ok(c) => match c.chat(&session_id, &text).await {
-                                        Ok(rx) => stream_rx = Some(rx),
-                                        Err(e) => {
-                                            chat.busy = false;
-                                            chat.error = Some(e.to_string());
-                                        }
-                                    },
-                                    Err(e) => {
-                                        chat.busy = false;
-                                        chat.error = Some(e.to_string());
-                                    }
-                                }
+                            },
+                            Err(e) => {
+                                chat.busy = false;
+                                chat.error = Some(e.to_string());
                             }
                         }
                     }
-                    _ => {}
                 }
             }
             Some(resp) = async {
@@ -158,6 +165,7 @@ enum LoopAction {
     NewSession,
     Open(usize),
     Back,
+    Cancel,
     Send(String),
 }
 
@@ -174,6 +182,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> LoopAction {
             ChatAction::None => LoopAction::None,
             ChatAction::Quit => LoopAction::Quit,
             ChatAction::Back => LoopAction::Back,
+            ChatAction::Cancel => LoopAction::Cancel,
             ChatAction::Send(text) => LoopAction::Send(text),
         },
     }
